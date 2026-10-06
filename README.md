@@ -1,4 +1,4 @@
-﻿# Linux 4.4.94+ for HiBy X1600 players
+# Linux 4.4.94+ for HiBy X1600 players
 
 A kit to rebuild the kernel of the HiBy players built on the **Ingenic X1600** from Ingenic's public SDK and put it into a firmware image, for anyone making custom firmware for them.
 
@@ -12,7 +12,8 @@ On both players the resulting kernel:
 - **loads HiBy's closed-source modules unchanged** (32 on the R3 Pro II, 28 on the R1): same vermagic `4.4.94+`, same exported symbols, same structures;
 - **uses the board's original device tree**, byte for byte;
 - **adds what the stock kernel lacks:** compressed swap in RAM (zram, LZ4), about 1.1 MB of RAM freed and the deadline I/O scheduler;
-- **can replace the closed Wi-Fi/Bluetooth driver** `cywdhd.ko` with mainline `brcmfmac` and a small open board module, `bcm_wlbt_power` (see [Wi-Fi and Bluetooth](#wi-fi-and-bluetooth-without-cywdhd)).
+- **can replace the closed Wi-Fi/Bluetooth driver** `cywdhd.ko` with mainline `brcmfmac` and a small open board module, `bcm_wlbt_power` (see [Wi-Fi and Bluetooth](#wi-fi-and-bluetooth-without-cywdhd));
+- **comes with open sources for HiBy's sound card drivers** (`x1600_hiby_r1_sound_card.ko`, `x1600_hiby_r3proii_sound_card.ko`), drop-in replacements for the closed ones (see [The sound card](#the-sound-card)).
 
 Working on both players: boot, display and touch, audio (3.5 mm, the R3 Pro II's balanced output, DSD), Wi-Fi, Bluetooth, microSD, USB (ADB, mass storage, USB DAC, OTG), charging and LEDs.
 
@@ -42,6 +43,7 @@ The method, the Docker environment and three patches (0001, 0002, 0013) come fro
     boards/MODEL/               one folder per player:
       modules-need.txt            the symbols the HiBy modules import
       hiby-exports.txt            the symbols the HiBy modules export to ours
+      modules/                    that player's own modules, built out of tree
       rootfs/                     files for that player's root filesystem
       stock.dtb, stock.kallsyms   extracted from the stock firmware, not in git
     modules/bcm_wlbt_power/     Wi-Fi/Bluetooth power for brcmfmac, built out of tree
@@ -79,7 +81,7 @@ For the R1, `--model r1` and the `r1-*.config` fragments.
   4. `configs/MODEL-required.config` and the fragments, each option checked (an option that did not take effect is reported);
   5. a check of the options that decide the vermagic (`PREEMPT`, `MODULE_UNLOAD`, `CPU_MIPS32_R2`, `32BIT`, no `MODVERSIONS`);
   6. building `xImage`;
-  7. building the modules a fragment sets to `m` and the ones in `modules/`, and checking that every symbol they import is in the kernel, in one of them or in `boards/MODEL/hiby-exports.txt`.
+  7. building the modules a fragment sets to `m` and the ones in `modules/` and `boards/MODEL/modules/`, and checking that every symbol they import is in the kernel, in one of them or in `boards/MODEL/hiby-exports.txt`.
 - **Output** in `out/`, with NAME the model unless `--name` says otherwise: `xImage-NAME`, `modules-NAME/`, `System.map-NAME`, `config-NAME`, `build-NAME.log` and `report-NAME.txt`.
 - **The report** lists:
   - which of the symbols imported by the HiBy modules are missing (445 on the R3 Pro II, 431 on the R1; must be 0);
@@ -185,6 +187,20 @@ A player that checks for `wlan0` to decide whether the device has Wi-Fi should a
 
 To go back to `cywdhd`, leave the four changes and the three modules out.
 
+## The sound card
+`boards/MODEL/modules/x1600_hiby_MODEL_sound_card/` holds an open source for the board's ASoC machine driver, the module that ties the X1600 I2S controller (`soc_aic.ko`) to the DAC. Its `.ko` has the vendor module's file name and replaces it in `/module_driver`; the stock `x1600_hiby_MODEL_sound_card.sh` loads it unchanged.
+
+It keeps everything the player sees: the platform device `hiby-hifi-board.0`, the card `hiby-sound-card`, the DAI links and the mixer controls, with the same names, ranges and behaviour. The two modules were checked against the vendor ones by running both, function by function, in an emulator with every external call recorded: every route, sample rate, DoP setting and error path gives the same calls with the same arguments, in the same order.
+
+| board | DAC | links | controls |
+|---|---|---|---|
+| R1 | CS43131 (`codec_cs43131.ko`) | `x1600-i2s`, the X1600 is the I2S master | `Output Port Switch` 0-5: 2 and 3 power the DAC up |
+| R3 Pro II | CS43198 (`codec_cs43198_dual.ko`) behind the HBC3000 (`sa_sound_hbc3000.ko`) | `x1600-i2s`, `x1600-spdif`, the HBC3000 is the I2S master | `Output Port Switch` 0-7, `Balance Lineout En`, `DOP_EN` |
+
+`Output Port Switch` on the R3 Pro II: 1 and 2 the 3.5 mm jack (line out, headphones), 3 the 4.4 mm jack (headphones, or line out with `Balance Lineout En`), 4 S/PDIF, anything else off. Two vendor behaviours are kept on purpose, since players work around them: moving between 1 and 2 does nothing, and writing the current route does nothing except for 3, which applies `Balance Lineout En` again.
+
+The only differences: on the R3 Pro II the workqueue is created before the GPIOs are requested, a failed allocation fails the probe, and removing the driver frees what the probe took (GPIOs, workqueue, the `soc_aic` callbacks), so the module can be unloaded and loaded again.
+
 ## zram on the device
 `rootfs/etc/init.d/S12zram.sh`, which `rcS` runs at boot:
 - creates a 24 MB `/dev/zram0` with LZ4;
@@ -197,6 +213,7 @@ With the stock kernel, which has no zram, it does nothing. To check: `cat /proc/
 2. `configs/MODEL-required.config`, and the other fragments the board wants.
 3. Build with `--model MODEL`. The report says which of the needed symbols the kernel does not export yet; the patches here were written for the R3 Pro II and the R1 and may need company.
 4. For `bcm_wlbt_power`, the pins from the board's stock `cywdhd.sh` in `boards/MODEL/rootfs/module_driver/bcm_wlbt_power.sh`.
+5. Optionally, its sound card driver in `boards/MODEL/modules/`, with the symbols it takes from HiBy modules in `hiby.symvers` there and in `hiby-exports.txt`.
 
 ## License
 GPL-2.0, like the Linux kernel the patches apply to (see `LICENSE`).

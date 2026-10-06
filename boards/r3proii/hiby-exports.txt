@@ -1,5 +1,17 @@
 # Symbols the HiBy modules loaded before modules/ export, which a module
-# built here may use: soc_msc.ko and soc_utils.ko.
+# built here may use: soc_msc.ko and soc_utils.ko, and for the sound card
+# soc_aic.ko, sa_sound_hbc3000.ko and codec_cs43198_dual.ko.
 jzmmc_manual_detect
 ingenic_rtc32k_disable
 ingenic_rtc32k_enable
+aic_slave_trigger
+cs43198_set_dsd_en
+hbc3000_disable
+hbc3000_enable
+hbc3000_set_codec_type
+hbc3000_set_gpo
+hbc3000_set_power_down
+hbc3000_set_samplerate
+hbc3000_set_spdif_mode
+hbc3000_start
+hbc3000_stop

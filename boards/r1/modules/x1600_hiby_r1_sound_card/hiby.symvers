@@ -1,0 +1,2 @@
+0x00000000	aic_slave_trigger	soc_aic	EXPORT_SYMBOL
+0x00000000	cs43131_set_power	codec_cs43131	EXPORT_SYMBOL

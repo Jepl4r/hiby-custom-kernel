@@ -153,8 +153,9 @@ cp arch/mips/boot/zcompressed/xImage "$OUT/xImage-$NAME"
 cp System.map "$OUT/System.map-$NAME"
 cp .config "$OUT/config-$NAME"
 
-# Modules: the options a fragment sets to m, and the board modules in
-# modules/, built out of tree from a copy so that the repo stays clean.
+# Modules: the options a fragment sets to m, the modules in modules/ and in
+# boards/MODEL/modules/, built out of tree from a copy so that the repo stays
+# clean.
 MODDIR=$OUT/modules-$NAME
 rm -rf "$MODDIR" /build/ext && mkdir -p "$MODDIR" /build/ext
 if grep -q '=m$' .config; then
@@ -162,7 +163,7 @@ if grep -q '=m$' .config; then
 	"${MK[@]}" -j"$JOBS" modules
 	find . -name '*.ko' -exec cp {} "$MODDIR/" \;
 fi
-for d in "$KIT"/modules/*/; do
+for d in "$KIT"/modules/*/ "$BOARD"/modules/*/; do
 	[ -f "$d/Makefile" ] || continue
 	m=$(basename "$d")
 	echo "=== building modules/$m ==="
