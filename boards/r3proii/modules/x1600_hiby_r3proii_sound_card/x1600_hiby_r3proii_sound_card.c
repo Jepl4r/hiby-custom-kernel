@@ -472,4 +472,5 @@ module_init(codec_board_init);
 module_exit(codec_board_exit);
 
 MODULE_DESCRIPTION("HiBy R3 Pro II sound card (X1600 I2S + HBC3000 + CS43198)");
+MODULE_AUTHOR("Mattia D'Oronzo <doronzomattia26@icloud.com>");
 MODULE_LICENSE("GPL");

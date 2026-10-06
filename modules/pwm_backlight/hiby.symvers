@@ -1,0 +1,6 @@
+0x00000000	pwm2_request	soc_pwm	EXPORT_SYMBOL
+0x00000000	pwm2_config	soc_pwm	EXPORT_SYMBOL
+0x00000000	pwm2_set_level	soc_pwm	EXPORT_SYMBOL
+0x00000000	pwm2_release	soc_pwm	EXPORT_SYMBOL
+0x00000000	param_gpio_ops	utils	EXPORT_SYMBOL
+0x00000000	gpio_to_str	utils	EXPORT_SYMBOL

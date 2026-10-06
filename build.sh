@@ -155,7 +155,7 @@ cp .config "$OUT/config-$NAME"
 
 # Modules: the options a fragment sets to m, the modules in modules/ and in
 # boards/MODEL/modules/, built out of tree from a copy so that the repo stays
-# clean.
+# clean. HIBY_MODEL tells a shared module which board it is built for.
 MODDIR=$OUT/modules-$NAME
 rm -rf "$MODDIR" /build/ext && mkdir -p "$MODDIR" /build/ext
 if grep -q '=m$' .config; then
@@ -168,7 +168,7 @@ for d in "$KIT"/modules/*/ "$BOARD"/modules/*/; do
 	m=$(basename "$d")
 	echo "=== building modules/$m ==="
 	cp -r "$d" "/build/ext/$m"
-	"${MK[@]}" M="/build/ext/$m" modules
+	"${MK[@]}" M="/build/ext/$m" HIBY_MODEL="$MODEL" modules
 	cp "/build/ext/$m"/*.ko "$MODDIR/"
 done
 if ls "$MODDIR"/*.ko >/dev/null 2>&1; then

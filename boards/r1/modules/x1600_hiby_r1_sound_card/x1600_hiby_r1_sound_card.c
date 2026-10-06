@@ -198,4 +198,5 @@ module_init(codec_board_init);
 module_exit(codec_board_exit);
 
 MODULE_DESCRIPTION("HiBy R1 sound card (X1600 I2S + CS43131)");
+MODULE_AUTHOR("Mattia D'Oronzo <doronzomattia26@icloud.com>");
 MODULE_LICENSE("GPL");

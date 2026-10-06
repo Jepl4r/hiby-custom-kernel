@@ -13,7 +13,7 @@ On both players the resulting kernel:
 - **uses the board's original device tree**, byte for byte;
 - **adds what the stock kernel lacks:** compressed swap in RAM (zram, LZ4), about 1.1 MB of RAM freed and the deadline I/O scheduler;
 - **can replace the closed Wi-Fi/Bluetooth driver** `cywdhd.ko` with mainline `brcmfmac` and a small open board module, `bcm_wlbt_power` (see [Wi-Fi and Bluetooth](#wi-fi-and-bluetooth-without-cywdhd));
-- **comes with open sources for HiBy's sound card drivers** (`x1600_hiby_r1_sound_card.ko`, `x1600_hiby_r3proii_sound_card.ko`), drop-in replacements for the closed ones (see [The sound card](#the-sound-card)).
+- **comes with open sources for eight of HiBy's closed modules**, drop-in replacements with the same file names, parameters and behaviour: the two sound card drivers and six small ones (see [Open HiBy modules](#open-hiby-modules)).
 
 Working on both players: boot, display and touch, audio (3.5 mm, the R3 Pro II's balanced output, DSD), Wi-Fi, Bluetooth, microSD, USB (ADB, mass storage, USB DAC, OTG), charging and LEDs.
 
@@ -46,7 +46,9 @@ The method, the Docker environment and three patches (0001, 0002, 0013) come fro
       modules/                    that player's own modules, built out of tree
       rootfs/                     files for that player's root filesystem
       stock.dtb, stock.kallsyms   extracted from the stock firmware, not in git
-    modules/bcm_wlbt_power/     Wi-Fi/Bluetooth power for brcmfmac, built out of tree
+    modules/                    modules for every board, built out of tree:
+      bcm_wlbt_power/             Wi-Fi/Bluetooth power for brcmfmac
+      soc_utils/, pwm_backlight/, sa_config_module/   open HiBy modules
     rootfs/                     files for the root filesystem of every player
     tools/extract-stock.py      device tree and symbols from the stock firmware
     tools/compare.py            comparison with the stock kernel
@@ -202,6 +204,24 @@ It keeps everything the player sees: the platform device `hiby-hifi-board.0`, th
 
 The only differences: on the R3 Pro II the workqueue is created before the GPIOs are requested, a failed allocation fails the probe, and removing the driver frees what the probe took (GPIOs, workqueue, the `soc_aic` callbacks), so the module can be unloaded and loaded again.
 
+## Open HiBy modules
+Open sources for closed modules of the stock firmware. Each `.ko` has the vendor module's file name and replaces it in `/module_driver`; the stock `.sh` that loads it stays as it is. They were checked like the sound card drivers: the vendor module and the rebuilt one run side by side in an emulator, every call into the kernel and the other HiBy modules recorded and compared, and their parameters (names, types, defaults, permissions) and tables (devices, drivers, file operations, sysfs attributes) compared too.
+
+| module | where | boards | what it does |
+|---|---|---|---|
+| `soc_utils.ko` | `modules/soc_utils` | both | the 32 kHz clock out on PC26 for the Wi-Fi/Bluetooth chip: `ingenic_rtc32k_enable/disable`, counted |
+| `pwm_backlight.ko` | `modules/pwm_backlight` | both | the display backlight, on a PWM channel of `soc_pwm.ko` |
+| `sa_config_module.ko` | `modules/sa_config_module` | both | `/dev/sa-config`: two ioctls that return the model (`r1`, `r3proii`) and the firmware name (`r3proii.upt`) |
+| `fusb302b_add.ko` | `boards/r3proii/modules` | R3 Pro II | registers the FUSB302B Type-C controller with its board data for the driver of patch 0004 |
+| `gpio_aw95016_add.ko` | `boards/r3proii/modules` | R3 Pro II | registers the AW95016 GPIO expander for the driver of patch 0010 |
+| `sau.ko` | `boards/r3proii/modules` | R3 Pro II | `/sys/devices/platform/sa_information/sa_verification`, read by HiBy's player and bluealsa |
+
+`sa_config_module` is one source for every board: `build.sh` passes the board as `HIBY_MODEL`, which is also the model name the vendor module reports.
+
+What differs from the vendor modules, on purpose:
+- **`soc_utils`:** a disable with the count already at 0 is ignored; the vendor module takes the count below 0, and the next enable then leaves the clock off. It can also be unloaded.
+- **`gpio_aw95016_add`, `sau`, `sa_config_module`:** unloading frees what loading took (the RSTN GPIO, the sysfs group and the device, an empty `release` for the platform devices). The vendor `sau.ko` does not unregister anything when unloaded.
+
 ## zram on the device
 `rootfs/etc/init.d/S12zram.sh`, which `rcS` runs at boot:
 - creates a 24 MB `/dev/zram0` with LZ4;
@@ -214,7 +234,7 @@ With the stock kernel, which has no zram, it does nothing. To check: `cat /proc/
 2. `configs/MODEL-required.config`, and the other fragments the board wants.
 3. Build with `--model MODEL`. The report says which of the needed symbols the kernel does not export yet; the patches here were written for the R3 Pro II and the R1 and may need company.
 4. For `bcm_wlbt_power`, the pins from the board's stock `cywdhd.sh` in `boards/MODEL/rootfs/module_driver/bcm_wlbt_power.sh`.
-5. Optionally, its sound card driver in `boards/MODEL/modules/`, with the symbols it takes from HiBy modules in `hiby.symvers` there and in `hiby-exports.txt`.
+5. Optionally, its own open modules in `boards/MODEL/modules/` (the sound card driver, say), with the symbols they take from HiBy modules in a `hiby.symvers` next to them and in `hiby-exports.txt`. The shared ones in `modules/` are built for it as well; `sa_config_module` reports the folder name as the model.
 
 ## License
 GPL-2.0, like the Linux kernel the patches apply to (see `LICENSE`).
