@@ -1,0 +1,284 @@
+From 0c8d28df6c5eb8bcafd6666be3cfe6c131246b35 Mon Sep 17 00:00:00 2001
+From: Mattia D'Oronzo <doronzomattia26@icloud.com>
+Date: Mon, 5 Oct 2026 16:37:56 +0200
+Subject: [PATCH 07/13] leds: breathing trigger
+
+The vendor kernel's trigger for the charging LED: a 32-step fade,
+breaths_per_min times a minute, with invert.
+---
+ drivers/leds/trigger/Kconfig             |   8 +
+ drivers/leds/trigger/Makefile            |   1 +
+ drivers/leds/trigger/ledtrig-breathing.c | 230 +++++++++++++++++++++++
+ 3 files changed, 239 insertions(+)
+ create mode 100644 drivers/leds/trigger/ledtrig-breathing.c
+
+diff --git a/drivers/leds/trigger/Kconfig b/drivers/leds/trigger/Kconfig
+index 5bda6a9b..cb13cf2b 100644
+--- a/drivers/leds/trigger/Kconfig
++++ b/drivers/leds/trigger/Kconfig
+@@ -41,6 +41,14 @@ config LEDS_TRIGGER_IDE_DISK
+ 	  This allows LEDs to be controlled by IDE disk activity.
+ 	  If unsure, say Y.
+ 
++config LEDS_TRIGGER_BREATHING
++	tristate "LED Breathing Trigger"
++	depends on LEDS_TRIGGERS
++	help
++	  Fades the LED up and down, breaths_per_min times a minute. The
++	  trigger the vendor firmware uses for the charging LED.
++	  If unsure, say Y.
++
+ config LEDS_TRIGGER_HEARTBEAT
+ 	tristate "LED Heartbeat Trigger"
+ 	depends on LEDS_TRIGGERS
+diff --git a/drivers/leds/trigger/Makefile b/drivers/leds/trigger/Makefile
+index 1abf48da..e706dc04 100644
+--- a/drivers/leds/trigger/Makefile
++++ b/drivers/leds/trigger/Makefile
+@@ -2,6 +2,7 @@ obj-$(CONFIG_LEDS_TRIGGER_TIMER)	+= ledtrig-timer.o
+ obj-$(CONFIG_LEDS_TRIGGER_ONESHOT)	+= ledtrig-oneshot.o
+ obj-$(CONFIG_LEDS_TRIGGER_IDE_DISK)	+= ledtrig-ide-disk.o
+ obj-$(CONFIG_LEDS_TRIGGER_HEARTBEAT)	+= ledtrig-heartbeat.o
++obj-$(CONFIG_LEDS_TRIGGER_BREATHING)	+= ledtrig-breathing.o
+ obj-$(CONFIG_LEDS_TRIGGER_BACKLIGHT)	+= ledtrig-backlight.o
+ obj-$(CONFIG_LEDS_TRIGGER_GPIO)		+= ledtrig-gpio.o
+ obj-$(CONFIG_LEDS_TRIGGER_CPU)		+= ledtrig-cpu.o
+diff --git a/drivers/leds/trigger/ledtrig-breathing.c b/drivers/leds/trigger/ledtrig-breathing.c
+new file mode 100644
+index 00000000..c9bd7701
+--- /dev/null
++++ b/drivers/leds/trigger/ledtrig-breathing.c
+@@ -0,0 +1,230 @@
++/*
++ * LED "breathing" trigger
++ *
++ * Fades the LED up and down in 32 steps, breaths_per_min times a minute
++ * (15 by default). The trigger the vendor firmware uses for the charging
++ * LED: same name, same attributes and same curve.
++ *
++ * Built on ledtrig-heartbeat.c, Copyright (C) 2006 Atsushi Nemoto.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ */
++
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/init.h>
++#include <linux/slab.h>
++#include <linux/timer.h>
++#include <linux/sched.h>
++#include <linux/leds.h>
++#include <linux/reboot.h>
++#include "../leds.h"
++
++#define BREATHING_STEPS		32
++#define BREATHING_DEFAULT_BPM	15
++
++static int panic_breathing;
++
++struct breathing_trig_data {
++	unsigned int phase;
++	unsigned int breaths_per_min;
++	struct timer_list timer;
++	unsigned int invert;
++};
++
++/* One breath, in percent of max_brightness: a linear ramp up and down. */
++static const unsigned int breathing_table[BREATHING_STEPS] = {
++	0, 6, 13, 20, 26, 33, 40, 46, 53, 60, 66, 73, 80, 86, 93, 100,
++	93, 86, 80, 73, 66, 60, 53, 46, 40, 33, 26, 20, 13, 6, 0, 0,
++};
++
++static void led_breathing_function(unsigned long data)
++{
++	struct led_classdev *led_cdev = (struct led_classdev *) data;
++	struct breathing_trig_data *breathing_data = led_cdev->trigger_data;
++	unsigned int bpm = breathing_data->breaths_per_min;
++	unsigned long brightness;
++	unsigned long delay_ms;
++
++	if (unlikely(panic_breathing)) {
++		led_set_brightness(led_cdev, LED_OFF);
++		return;
++	}
++
++	if (breathing_data->phase >= BREATHING_STEPS)
++		breathing_data->phase = 0;
++
++	brightness = breathing_table[breathing_data->phase] *
++		     led_cdev->max_brightness / 100;
++	if (breathing_data->invert)
++		brightness = led_cdev->max_brightness - brightness;
++	breathing_data->phase++;
++
++	/* A minute split into breaths_per_min breaths of 32 steps each. */
++	delay_ms = bpm ? 60000 / BREATHING_STEPS / bpm : 0;
++	if (!delay_ms)
++		delay_ms = 100;
++
++	led_set_brightness_async(led_cdev, brightness);
++	mod_timer(&breathing_data->timer,
++		  jiffies + msecs_to_jiffies(delay_ms));
++}
++
++static ssize_t led_invert_show(struct device *dev,
++		struct device_attribute *attr, char *buf)
++{
++	struct led_classdev *led_cdev = dev_get_drvdata(dev);
++	struct breathing_trig_data *breathing_data = led_cdev->trigger_data;
++
++	return sprintf(buf, "%u\n", breathing_data->invert);
++}
++
++static ssize_t led_invert_store(struct device *dev,
++		struct device_attribute *attr, const char *buf, size_t size)
++{
++	struct led_classdev *led_cdev = dev_get_drvdata(dev);
++	struct breathing_trig_data *breathing_data = led_cdev->trigger_data;
++	unsigned long state;
++	int ret;
++
++	ret = kstrtoul(buf, 0, &state);
++	if (ret)
++		return ret;
++
++	breathing_data->invert = !!state;
++
++	return size;
++}
++
++static DEVICE_ATTR(invert, 0644, led_invert_show, led_invert_store);
++
++static ssize_t led_breaths_per_min_show(struct device *dev,
++		struct device_attribute *attr, char *buf)
++{
++	struct led_classdev *led_cdev = dev_get_drvdata(dev);
++	struct breathing_trig_data *breathing_data = led_cdev->trigger_data;
++
++	return sprintf(buf, "%u\n", breathing_data->breaths_per_min);
++}
++
++static ssize_t led_breaths_per_min_store(struct device *dev,
++		struct device_attribute *attr, const char *buf, size_t size)
++{
++	struct led_classdev *led_cdev = dev_get_drvdata(dev);
++	struct breathing_trig_data *breathing_data = led_cdev->trigger_data;
++	unsigned long bpm;
++	int ret;
++
++	ret = kstrtoul(buf, 0, &bpm);
++	if (ret)
++		return ret;
++
++	breathing_data->breaths_per_min = bpm;
++
++	return size;
++}
++
++static DEVICE_ATTR(breaths_per_min, 0644, led_breaths_per_min_show,
++		   led_breaths_per_min_store);
++
++static void breathing_trig_activate(struct led_classdev *led_cdev)
++{
++	struct breathing_trig_data *breathing_data;
++	int rc;
++
++	breathing_data = kzalloc(sizeof(*breathing_data), GFP_KERNEL);
++	if (!breathing_data)
++		return;
++
++	led_cdev->trigger_data = breathing_data;
++	rc = device_create_file(led_cdev->dev, &dev_attr_invert);
++	if (rc)
++		goto err_free;
++	rc = device_create_file(led_cdev->dev, &dev_attr_breaths_per_min);
++	if (rc)
++		goto err_invert;
++
++	setup_timer(&breathing_data->timer,
++		    led_breathing_function, (unsigned long) led_cdev);
++	breathing_data->phase = 0;
++	breathing_data->breaths_per_min = BREATHING_DEFAULT_BPM;
++	led_breathing_function(breathing_data->timer.data);
++	led_cdev->activated = true;
++	return;
++
++err_invert:
++	device_remove_file(led_cdev->dev, &dev_attr_invert);
++err_free:
++	led_cdev->trigger_data = NULL;
++	kfree(breathing_data);
++}
++
++static void breathing_trig_deactivate(struct led_classdev *led_cdev)
++{
++	struct breathing_trig_data *breathing_data = led_cdev->trigger_data;
++
++	if (led_cdev->activated) {
++		del_timer_sync(&breathing_data->timer);
++		device_remove_file(led_cdev->dev, &dev_attr_breaths_per_min);
++		device_remove_file(led_cdev->dev, &dev_attr_invert);
++		kfree(breathing_data);
++		led_cdev->trigger_data = NULL;
++		led_cdev->activated = false;
++	}
++}
++
++static struct led_trigger breathing_led_trigger = {
++	.name     = "breathing",
++	.activate = breathing_trig_activate,
++	.deactivate = breathing_trig_deactivate,
++};
++
++static int breathing_reboot_notifier(struct notifier_block *nb,
++				     unsigned long code, void *unused)
++{
++	led_trigger_unregister(&breathing_led_trigger);
++	return NOTIFY_DONE;
++}
++
++static int breathing_panic_notifier(struct notifier_block *nb,
++				    unsigned long code, void *unused)
++{
++	panic_breathing = 1;
++	return NOTIFY_DONE;
++}
++
++static struct notifier_block breathing_reboot_nb = {
++	.notifier_call = breathing_reboot_notifier,
++};
++
++static struct notifier_block breathing_panic_nb = {
++	.notifier_call = breathing_panic_notifier,
++};
++
++static int __init breathing_trig_init(void)
++{
++	int rc = led_trigger_register(&breathing_led_trigger);
++
++	if (!rc) {
++		atomic_notifier_chain_register(&panic_notifier_list,
++					       &breathing_panic_nb);
++		register_reboot_notifier(&breathing_reboot_nb);
++	}
++	return rc;
++}
++
++static void __exit breathing_trig_exit(void)
++{
++	unregister_reboot_notifier(&breathing_reboot_nb);
++	atomic_notifier_chain_unregister(&panic_notifier_list,
++					 &breathing_panic_nb);
++	led_trigger_unregister(&breathing_led_trigger);
++}
++
++module_init(breathing_trig_init);
++module_exit(breathing_trig_exit);
++
++MODULE_DESCRIPTION("Breathing LED trigger");
++MODULE_LICENSE("GPL");
+-- 
+2.43.0
+

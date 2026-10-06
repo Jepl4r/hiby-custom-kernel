@@ -1,0 +1,112 @@
+From 82b952b1a3a1b4e7c7cdc28885159285ff318e58 Mon Sep 17 00:00:00 2001
+From: Mattia D'Oronzo <doronzomattia26@icloud.com>
+Date: Mon, 5 Oct 2026 16:42:55 +0200
+Subject: [PATCH 09/13] dma: ingenic: interleaved transfers
+
+device_prep_interleaved_dma, as on the vendor kernel: the stock
+sa_hgl_dma module calls it unconditionally, and without it the call
+jumps to NULL. Stride mode, up to 255 lines of at most 7680 bytes per
+descriptor, chained.
+---
+ .../drivers/dma/ingenic/ingenic_dma.c         | 71 +++++++++++++++++++
+ 1 file changed, 71 insertions(+)
+
+diff --git a/module_drivers/drivers/dma/ingenic/ingenic_dma.c b/module_drivers/drivers/dma/ingenic/ingenic_dma.c
+index 98ae0d9e..ad1f1f26 100644
+--- a/module_drivers/drivers/dma/ingenic/ingenic_dma.c
++++ b/module_drivers/drivers/dma/ingenic/ingenic_dma.c
+@@ -582,6 +582,75 @@ static struct dma_async_tx_descriptor* ingenic_dma_prep_dma_sg(
+ 	return vchan_tx_prep(&dmac->vc, &sdesc->vd, flags);
+ }
+ 
++/*
++ * 2D memory to memory: numf lines of sgl[0].size bytes, each followed by a
++ * gap of src_icg bytes on the source side and dst_icg on the destination.
++ * The controller's stride mode takes up to 255 lines per descriptor, so the
++ * lines are spread over a chain. One chunk per frame only, of at most 7680
++ * bytes, both sides incrementing and scatter-gathered -- the shape the vendor
++ * kernel accepts, which is what its sa_hgl_dma module asks for.
++ */
++#define INTERLEAVED_MAX_LINES	255
++#define INTERLEAVED_MAX_SIZE	0x1e00
++
++static struct dma_async_tx_descriptor *ingenic_dma_prep_interleaved_dma(
++		struct dma_chan *chan, struct dma_interleaved_template *xt,
++		unsigned long flags)
++{
++	struct ingenic_dma_chan *dmac = to_ingenic_dma_chan(chan);
++	struct ingenic_dma_sdesc *sdesc;
++	struct data_chunk *chunk = &xt->sgl[0];
++	dma_addr_t src, dst;
++	size_t lines;
++	int i, nb;
++
++	if (!xt->src_inc || !xt->dst_inc || !xt->src_sgl || !xt->dst_sgl)
++		return NULL;
++	if (!xt->numf || xt->frame_size != 1 ||
++	    chunk->size > INTERLEAVED_MAX_SIZE)
++		return NULL;
++
++	nb = DIV_ROUND_UP(xt->numf, INTERLEAVED_MAX_LINES);
++	sdesc = ingenic_dma_alloc_swdesc(dmac, nb);
++	if (!sdesc)
++		return NULL;
++
++	sdesc->len = xt->numf * chunk->size;
++	lines = xt->numf;
++	src = xt->src_start;
++	dst = xt->dst_start;
++
++	for (i = 0; i < nb; i++) {
++		struct hdma_desc *desc = sdesc->hw_desc[i];
++		size_t count = min_t(size_t, lines, INTERLEAVED_MAX_LINES);
++
++		desc->dcm = DCM_SAI | DCM_DAI |
++			    (DCM_RDIL_MAX << DCM_RDIL_SFT) |
++			    (DCM_TSZ_AUTO << DCM_TSZ_SFT) |
++			    DCM_STDE | DCM_LINK;
++		/* line length in bytes, line count above it */
++		desc->dtc = chunk->size | count << 16;
++		desc->dsa = src;
++		desc->dta = dst;
++		desc->sd = chunk->dst_icg << 16 | chunk->src_icg;
++		desc->drt = INGENIC_DMA_REQ_AUTO_TX;
++		if (i)
++			sdesc->hw_desc[i - 1]->dtc |=
++				PHY_TO_DESC_DOA(sdesc->hw_desc_dma[i]);
++
++		lines -= count;
++		src += (chunk->size + chunk->src_icg) * count;
++		dst += (chunk->size + chunk->dst_icg) * count;
++	}
++	sdesc->hw_desc[nb - 1]->dcm =
++		(sdesc->hw_desc[nb - 1]->dcm & ~(DCM_LINK | DCM_TIE)) | DCM_TIE;
++
++	/* use 8-word descriptors */
++	sdesc->dcs = DCS_DES8;
++
++	return vchan_tx_prep(&dmac->vc, &sdesc->vd, flags);
++}
++
+ static size_t ingenic_dma_desc_residue(struct ingenic_dma_chan *dmac, struct ingenic_dma_sdesc *sdesc)
+ {
+ 	unsigned int residue = 0, shift, pass = 0;
+@@ -1158,6 +1227,7 @@ static int __init ingenic_dma_probe(struct platform_device *pdev)
+ 	dma_cap_set(DMA_SG, dma->dma_device.cap_mask);
+ 	dma_cap_set(DMA_SLAVE, dma->dma_device.cap_mask);
+ 	dma_cap_set(DMA_CYCLIC, dma->dma_device.cap_mask);
++	dma_cap_set(DMA_INTERLEAVE, dma->dma_device.cap_mask);
+ 	dma_cap_set(DMA_PRIVATE, dma->dma_device.cap_mask);
+ 
+ 	dma->dma_device.dev = &pdev->dev;
+@@ -1168,6 +1238,7 @@ static int __init ingenic_dma_probe(struct platform_device *pdev)
+ 	dma->dma_device.device_prep_dma_sg = ingenic_dma_prep_dma_sg;
+ 	dma->dma_device.device_prep_dma_cyclic = ingenic_dma_prep_dma_cyclic;
+ 	dma->dma_device.device_prep_dma_memcpy = ingenic_dma_prep_dma_memcpy;
++	dma->dma_device.device_prep_interleaved_dma = ingenic_dma_prep_interleaved_dma;
+ 	dma->dma_device.device_config = ingenic_dma_config;
+ 	dma->dma_device.device_terminate_all = ingenic_dma_terminate_all;
+ 	dma->dma_device.device_issue_pending = ingenic_dma_issue_pending;
+-- 
+2.43.0
+

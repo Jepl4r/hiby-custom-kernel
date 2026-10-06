@@ -1,0 +1,119 @@
+From 7b21a693559eb83999aee081453a6539d27400f7 Mon Sep 17 00:00:00 2001
+From: Mattia D'Oronzo <doronzomattia26@icloud.com>
+Date: Mon, 5 Oct 2026 18:16:55 +0200
+Subject: [PATCH 10/13] gpio: pca953x: AW95016
+
+The R3 Pro II's GPIO expander (port F, GPIOs 160-175) is an AW95016,
+registered by the stock gpio_aw95016_add module as an i2c device named
+"aw95016". The vendor kernel drives it as a 16-line PCA953x with an
+interrupt, with two differences: a set direction bit makes the pin an
+output, and the lines are not marked as sleeping, since the HiBy modules
+drive them with gpio_set_value(). Without the match the expander has no
+driver and Wi-Fi, Bluetooth, the HBC3000, the card slot power and the
+other port F lines cannot be requested.
+---
+ drivers/gpio/gpio-pca953x.c | 39 ++++++++++++++++++++++++++++++++-----
+ 1 file changed, 34 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpio/gpio-pca953x.c b/drivers/gpio/gpio-pca953x.c
+index c844d7ec..fb161fae 100644
+--- a/drivers/gpio/gpio-pca953x.c
++++ b/drivers/gpio/gpio-pca953x.c
+@@ -44,6 +44,11 @@
+ #define PCA953X_TYPE		0x1000
+ #define PCA957X_TYPE		0x2000
+ #define PCA_TYPE_MASK		0xF000
++/*
++ * AW95016: a set direction bit makes the pin an output, the opposite of the
++ * PCA953x parts.
++ */
++#define PCA_DIR_INVERTED	0x10000
+ 
+ #define PCA_CHIP_TYPE(x)	((x) & PCA_TYPE_MASK)
+ 
+@@ -73,6 +78,8 @@ static const struct i2c_device_id pca953x_id[] = {
+ 	{ "tca6424", 24 | PCA953X_TYPE | PCA_INT, },
+ 	{ "tca9539", 16 | PCA953X_TYPE | PCA_INT, },
+ 	{ "xra1202", 8  | PCA953X_TYPE },
++	/* Awinic AW95016, the GPIO expander of the HiBy R3 Pro II (port F) */
++	{ "aw95016", 16 | PCA953X_TYPE | PCA_INT | PCA_DIR_INVERTED, },
+ 	{ }
+ };
+ MODULE_DEVICE_TABLE(i2c, pca953x_id);
+@@ -114,6 +121,14 @@ static inline struct pca953x_chip *to_pca(struct gpio_chip *gc)
+ 	return container_of(gc, struct pca953x_chip, gpio_chip);
+ }
+ 
++/* The input pins of a bank, as a mask. */
++static inline u8 pca953x_inputs(struct pca953x_chip *chip, int bank)
++{
++	u8 dir = chip->reg_direction[bank];
++
++	return chip->driver_data & PCA_DIR_INVERTED ? ~dir : dir;
++}
++
+ static int pca953x_read_single(struct pca953x_chip *chip, int reg, u32 *val,
+ 				int off)
+ {
+@@ -221,7 +236,12 @@ static int pca953x_gpio_direction_input(struct gpio_chip *gc, unsigned off)
+ 	int ret, offset = 0;
+ 
+ 	mutex_lock(&chip->i2c_lock);
+-	reg_val = chip->reg_direction[off / BANK_SZ] | (1u << (off % BANK_SZ));
++	if (chip->driver_data & PCA_DIR_INVERTED)
++		reg_val = chip->reg_direction[off / BANK_SZ] &
++			  ~(1u << (off % BANK_SZ));
++	else
++		reg_val = chip->reg_direction[off / BANK_SZ] |
++			  (1u << (off % BANK_SZ));
+ 
+ 	switch (chip->chip_type) {
+ 	case PCA953X_TYPE:
+@@ -273,7 +293,12 @@ static int pca953x_gpio_direction_output(struct gpio_chip *gc,
+ 	chip->reg_output[off / BANK_SZ] = reg_val;
+ 
+ 	/* then direction */
+-	reg_val = chip->reg_direction[off / BANK_SZ] & ~(1u << (off % BANK_SZ));
++	if (chip->driver_data & PCA_DIR_INVERTED)
++		reg_val = chip->reg_direction[off / BANK_SZ] |
++			  (1u << (off % BANK_SZ));
++	else
++		reg_val = chip->reg_direction[off / BANK_SZ] &
++			  ~(1u << (off % BANK_SZ));
+ 	switch (chip->chip_type) {
+ 	case PCA953X_TYPE:
+ 		offset = PCA953X_DIRECTION;
+@@ -362,7 +387,11 @@ static void pca953x_setup_gpio(struct pca953x_chip *chip, int gpios)
+ 	gc->direction_output = pca953x_gpio_direction_output;
+ 	gc->get = pca953x_gpio_get_value;
+ 	gc->set = pca953x_gpio_set_value;
+-	gc->can_sleep = true;
++	/*
++	 * Not marked as sleeping, as on the vendor kernel: the HiBy modules
++	 * drive these lines with gpio_set_value() and friends.
++	 */
++	gc->can_sleep = false;
+ 
+ 	gc->base = chip->gpio_start;
+ 	gc->ngpio = gpios;
+@@ -407,7 +436,7 @@ static void pca953x_irq_bus_sync_unlock(struct irq_data *d)
+ 	/* Look for any newly setup interrupt */
+ 	for (i = 0; i < NBANK(chip); i++) {
+ 		new_irqs = chip->irq_trig_fall[i] | chip->irq_trig_raise[i];
+-		new_irqs &= ~chip->reg_direction[i];
++		new_irqs &= ~pca953x_inputs(chip, i);
+ 
+ 		while (new_irqs) {
+ 			level = __ffs(new_irqs);
+@@ -478,7 +507,7 @@ static bool pca953x_irq_pending(struct pca953x_chip *chip, u8 *pending)
+ 
+ 	/* Remove output pins from the equation */
+ 	for (i = 0; i < NBANK(chip); i++)
+-		cur_stat[i] &= chip->reg_direction[i];
++		cur_stat[i] &= pca953x_inputs(chip, i);
+ 
+ 	memcpy(old_stat, chip->irq_stat, NBANK(chip));
+ 
+-- 
+2.43.0
+

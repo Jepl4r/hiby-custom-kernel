@@ -1,0 +1,22 @@
+From 8d97217bcaff6394e90a7adf0c44a0036b50a9bc Mon Sep 17 00:00:00 2001
+From: hiby-r1-linux-kernel-compiling <kernel@hiby-r1.local>
+Date: Tue, 25 Aug 2026 07:42:46 +0000
+Subject: [PATCH 01/13] kconfig: give REGMAP_IRQ a prompt
+
+---
+ drivers/base/regmap/Kconfig | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/base/regmap/Kconfig b/drivers/base/regmap/Kconfig
+index db9d00c3..329be0b8 100644
+--- a/drivers/base/regmap/Kconfig
++++ b/drivers/base/regmap/Kconfig
+@@ -28,4 +28,4 @@ config REGMAP_MMIO
+ 	tristate
+ 
+ config REGMAP_IRQ
+-	bool
++	bool "Regmap IRQ support"
+-- 
+2.43.0
+

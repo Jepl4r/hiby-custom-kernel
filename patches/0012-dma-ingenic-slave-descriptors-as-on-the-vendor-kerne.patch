@@ -1,0 +1,62 @@
+From 5404d77593bdf16ce12711b6d19d23d29b7254e1 Mon Sep 17 00:00:00 2001
+From: Mattia D'Oronzo <doronzomattia26@icloud.com>
+Date: Mon, 5 Oct 2026 20:21:07 +0200
+Subject: [PATCH 12/13] dma: ingenic: slave descriptors as on the vendor kernel
+
+The vendor kernel builds every slave descriptor with the transfer size
+left to the controller (TSZ auto, count in bytes) and the request length
+(RDIL) set to one burst of maxburst words: 32 bytes for the AIC with
+24-bit stereo. The SDK fixes the transfer size from maxburst read as a
+byte count and leaves RDIL at 0, so the AIC gets one 32-bit word per DMA
+request where the vendor kernel gives it a whole burst. The sound card,
+the UART and every other slave user now see the transfers the HiBy
+modules were built against.
+---
+ .../drivers/dma/ingenic/ingenic_dma.c         | 24 ++++++++++++++-----
+ 1 file changed, 18 insertions(+), 6 deletions(-)
+
+diff --git a/module_drivers/drivers/dma/ingenic/ingenic_dma.c b/module_drivers/drivers/dma/ingenic/ingenic_dma.c
+index ad1f1f26..54b74ce3 100644
+--- a/module_drivers/drivers/dma/ingenic/ingenic_dma.c
++++ b/module_drivers/drivers/dma/ingenic/ingenic_dma.c
+@@ -232,8 +232,7 @@ static unsigned int build_one_slave_desc(struct ingenic_dma_chan *dmac, dma_addr
+ 		struct hdma_desc *desc)
+ {
+ 	enum dma_transfer_direction dir;
+-	/* unsigned int rdil; */
+-	unsigned int tsz, transfer_shift;
++	unsigned int burst, rdil;
+ 
+ 	desc->dcm = dmac->dcm;
+ 	desc->drt = dmac->slave_id;
+@@ -260,10 +259,23 @@ static unsigned int build_one_slave_desc(struct ingenic_dma_chan *dmac, dma_addr
+ 		BUG();
+ 	}
+ 
+-	tsz = get_max_tsz(dmac->maxburst, &transfer_shift);
+-	desc->dtc = length >> transfer_shift; /* in burst unit */
+-	desc->dcm |= tsz << DCM_TSZ_SFT;
+-	return desc->dtc << transfer_shift;
++	/*
++	 * As on the vendor kernel: the controller picks the transfer size
++	 * itself (TSZ auto, so the count is in bytes) and each request from the
++	 * peripheral moves one whole burst of maxburst words (RDIL). A fixed
++	 * transfer size with RDIL 0 moves a single word per request instead.
++	 */
++	burst = dmac->maxburst * dmac->transfer_width;
++	if (burst < 5)
++		rdil = burst;
++	else
++		rdil = min(fls(burst) + 1, DCM_RDIL_MAX);
++	desc->dcm |= DCM_TSZ_AUTO << DCM_TSZ_SFT | rdil << DCM_RDIL_SFT;
++
++	WARN_ON(length & ~DTC_TC_MSK);
++	WARN_ON(length & (dmac->transfer_width - 1));
++	desc->dtc = length & ~(dmac->transfer_width - 1) & DTC_TC_MSK;
++	return desc->dtc;
+ }
+ 
+ static void ingenic_dma_free_swdesc(struct virt_dma_desc *vd)
+-- 
+2.43.0
+

@@ -1,0 +1,24 @@
+From 6ab9dbd73389478e049503e8bb1adb653e8df11d Mon Sep 17 00:00:00 2001
+From: hiby-r1-linux-kernel-compiling <kernel@hiby-r1.local>
+Date: Tue, 25 Aug 2026 07:42:46 +0000
+Subject: [PATCH 02/13] dma: advertise DMA_PRIVATE so HGL can claim a channel
+
+---
+ module_drivers/drivers/dma/ingenic/ingenic_dma.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/module_drivers/drivers/dma/ingenic/ingenic_dma.c b/module_drivers/drivers/dma/ingenic/ingenic_dma.c
+index fc3f9100..98ae0d9e 100644
+--- a/module_drivers/drivers/dma/ingenic/ingenic_dma.c
++++ b/module_drivers/drivers/dma/ingenic/ingenic_dma.c
+@@ -1158,6 +1158,7 @@ static int __init ingenic_dma_probe(struct platform_device *pdev)
+ 	dma_cap_set(DMA_SG, dma->dma_device.cap_mask);
+ 	dma_cap_set(DMA_SLAVE, dma->dma_device.cap_mask);
+ 	dma_cap_set(DMA_CYCLIC, dma->dma_device.cap_mask);
++	dma_cap_set(DMA_PRIVATE, dma->dma_device.cap_mask);
+ 
+ 	dma->dma_device.dev = &pdev->dev;
+ 	dma->dma_device.device_alloc_chan_resources = ingenic_dma_alloc_chan_resources;
+-- 
+2.43.0
+

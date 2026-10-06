@@ -1,0 +1,85 @@
+From 3dea05af5c008ad36d5edf0f774e2f6f05d11d06 Mon Sep 17 00:00:00 2001
+From: hiby-r1-linux-kernel-compiling <kernel@hiby-r1.local>
+Date: Mon, 5 Oct 2026 20:46:13 +0200
+Subject: [PATCH 13/13] mm/page_alloc: don't reserve a highatomic pageblock
+ that is the whole zone
+
+This board sets CONFIG_FORCE_MAX_ZONEORDER=15 (from Ingenic's own SDK
+defconfig), which makes pageblock_nr_pages 16384 pages = 64MB, against a
+single Normal zone of ~56MB. "Page block order: 14" and one block for the
+entire zone, confirmed on hardware via /proc/pagetypeinfo.
+
+The consequence is that the first successful order>0 ALLOC_HARDER
+allocation converts the ENTIRE zone to MIGRATE_HIGHATOMIC. Every
+non-atomic allocation then fails while free memory looks abundant, reclaim
+reports all_unreclaimable, and the OOM killer runs. Captured on real
+hardware during a WiFi download writing to the SD card:
+
+  Normal free:38912kB min:8192kB low:10240kB ... all_unreclaimable? yes
+  Normal: 648*4kB (H) 482*8kB (H) 293*16kB (H) ... = 38912kB
+  Out of memory: Kill process 1020 (library_standal)
+  Kernel panic - not syncing: Out of memory and no killable processes...
+
+38MB free, every block (H), OOM anyway. Raising min_free_kbytes to 8MB does
+not help -- it only gives the reserve more to swallow, and the failure gets
+worse rather than better.
+
+The existing cap cannot prevent this. max_managed is
+managed_pages/100 + pageblock_nr_pages, which here is ~66MB, larger than
+the 56MB zone: nr_reserved_highatomic can never reach it, so the check
+never fires. It is not an accounting bug -- the limit is structurally
+unreachable whenever one pageblock exceeds the zone.
+
+Refuse the reservation when a pageblock is a large fraction of the zone.
+The highatomic reserve is an optimisation for high-order atomic
+allocations, not a correctness requirement; declining it means they come
+from the normal free lists instead.
+
+Guarding here rather than lowering FORCE_MAX_ZONEORDER is deliberate: that
+would also shrink the largest contiguous allocation available to this
+platform's closed-source DMA-hungry drivers (HGL alone wants 6MB), which is
+a far riskier change than declining an optimisation.
+---
+ mm/page_alloc.c | 26 ++++++++++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+
+diff --git a/mm/page_alloc.c b/mm/page_alloc.c
+index 6b5421ae..5e83d458 100644
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -1689,6 +1689,32 @@ static void reserve_highatomic_pageblock(struct page *page, struct zone *zone,
+ 	int mt;
+ 	unsigned long max_managed, flags;
+ 
++	/*
++	 * Refuse entirely when one pageblock is a large fraction of the whole
++	 * zone. This board sets CONFIG_FORCE_MAX_ZONEORDER=15, giving
++	 * pageblock_nr_pages == 16384 (64MB) against a single ~56MB Normal
++	 * zone -- so reserving even one pageblock converts the ENTIRE zone to
++	 * MIGRATE_HIGHATOMIC, after which every non-atomic allocation fails
++	 * while free memory looks abundant. Observed on real hardware: OOM
++	 * (and eventually "Out of memory and no killable processes" panic)
++	 * with 38MB free, every free block tagged (H).
++	 *
++	 * The existing cap below cannot prevent this: max_managed works out to
++	 * managed/100 + pageblock_nr_pages, which here is ~66MB -- larger than
++	 * the 56MB zone, so nr_reserved_highatomic can never reach it and the
++	 * check never fires.
++	 *
++	 * The reserve is an optimisation for high-order atomic allocations,
++	 * not a correctness requirement; declining it simply means those come
++	 * from the normal free lists, which is the behaviour on a kernel that
++	 * never happens to take this path at all. Guarding here rather than
++	 * lowering FORCE_MAX_ZONEORDER deliberately: that would also shrink the
++	 * largest contiguous allocation available to the vendor's DMA-hungry
++	 * closed-source drivers, which is a much riskier change.
++	 */
++	if (pageblock_nr_pages * 4 > zone->managed_pages)
++		return;
++
+ 	/*
+ 	 * Limit the number reserved to 1 pageblock or roughly 1% of a zone.
+ 	 * Check is race-prone but harmless.
+-- 
+2.43.0
+

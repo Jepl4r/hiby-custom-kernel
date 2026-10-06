@@ -1,0 +1,75 @@
+#!/bin/sh
+#
+# wlbt-wifi up|down -- Wi-Fi with bcm_wlbt_power and brcmfmac.
+#
+#   up    powers the chip, points the firmware loader at the stock AP6212A
+#         blob, loads brcmfmac and waits for the interface; then gives it the
+#         stock MAC address through S43wifi_bcm_init_config, when that script
+#         is there
+#   down  takes the interface down, unloads brcmfmac and powers the chip down
+#
+# Exits 0 without doing anything where bcm_wlbt_power is not loaded, so the
+# stock wifi_on.sh and wifi_off.sh can call it unconditionally.
+
+RADIO=/sys/devices/platform/bcm_wlbt_power
+IFACE=${WLBT_IFACE:-wlan0}
+MODDIR=${WLBT_MODDIR:-/module_driver}
+FWSRC=${WLBT_FWSRC:-/lib/firmware/wifi_bcm}
+FWDIR=/tmp/brcmfmac
+MAC_SCRIPT=/etc/init.d/S43wifi_bcm_init_config
+
+[ -e $RADIO/wifi_power ] || exit 0
+
+wifi_down() {
+	[ -e /sys/class/net/$IFACE ] && ifconfig $IFACE down
+	# A driver that will not unload keeps the power, or it would lose the
+	# chip under it.
+	if [ -d /sys/module/brcmfmac ] && ! rmmod brcmfmac; then
+		return 1
+	fi
+	[ -d /sys/module/brcmutil ] && rmmod brcmutil
+	echo 0 > $RADIO/wifi_power
+}
+
+wifi_up() {
+	echo 1 > $RADIO/wifi_power || return 1
+
+	# brcmfmac asks for brcm/brcmfmac43430-sdio.* in the firmware search
+	# path, which FWDIR is put in front of.
+	mkdir -p $FWDIR/brcm
+	ln -sf $FWSRC/fw_bcm43438a1.bin $FWDIR/brcm/brcmfmac43430-sdio.bin
+	ln -sf $FWSRC/nvram_ap6212a.txt $FWDIR/brcm/brcmfmac43430-sdio.txt
+	echo -n $FWDIR > /sys/module/firmware_class/parameters/path
+
+	[ -d /sys/module/brcmutil ] || insmod $MODDIR/brcmutil.ko || return 1
+	[ -d /sys/module/brcmfmac ] || insmod $MODDIR/brcmfmac.ko || return 1
+
+	# The interface appears once the firmware is in the chip, after insmod
+	# returns.
+	count=0
+	while [ ! -e /sys/class/net/$IFACE ]; do
+		[ $count -ge 100 ] && return 1
+		count=$((count + 1))
+		usleep 50000
+	done
+
+	[ -x $MAC_SCRIPT ] && $MAC_SCRIPT start
+	return 0
+}
+
+case "$1" in
+up)
+	if ! wifi_up; then
+		echo "wlbt-wifi: Wi-Fi did not come up" >&2
+		wifi_down
+		exit 1
+	fi
+	;;
+down)
+	wifi_down
+	;;
+*)
+	echo "usage: $0 up|down" >&2
+	exit 2
+	;;
+esac

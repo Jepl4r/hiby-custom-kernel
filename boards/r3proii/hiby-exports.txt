@@ -1,0 +1,5 @@
+# Symbols the HiBy modules loaded before modules/ export, which a module
+# built here may use: soc_msc.ko and soc_utils.ko.
+jzmmc_manual_detect
+ingenic_rtc32k_disable
+ingenic_rtc32k_enable

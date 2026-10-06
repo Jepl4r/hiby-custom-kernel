@@ -1,0 +1,91 @@
+From 57ef935191367963cea77b9269221dc06924504a Mon Sep 17 00:00:00 2001
+From: Mattia D'Oronzo <doronzomattia26@icloud.com>
+Date: Mon, 5 Oct 2026 16:37:55 +0200
+Subject: [PATCH 05/13] usb: gadget: configfs: usb_gadget class and
+ soft_disconnect
+
+/sys/class/usb_gadget/android0 as on the vendor kernel, with a
+soft_disconnect attribute: 1 drops the pull-up, 0 raises it again and
+hands the functions the disconnect, so the host enumerates afresh.
+---
+ drivers/usb/gadget/configfs.c | 51 ++++++++++++++++++++++++++++++++++-
+ 1 file changed, 50 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/usb/gadget/configfs.c b/drivers/usb/gadget/configfs.c
+index de326546..66c74024 100644
+--- a/drivers/usb/gadget/configfs.c
++++ b/drivers/usb/gadget/configfs.c
+@@ -1843,12 +1843,57 @@ static ssize_t event_show(struct device *pdev, struct device_attribute *attr,
+ }
+ 
+ 
++/*
++ * Makes the host see the cable pulled and plugged back in without touching
++ * the configuration: 1 drops the D+ pull-up, 0 raises it again, and the host
++ * then enumerates the gadget afresh -- which is how a host learns that a
++ * function was swapped behind a cable that never moved. Writing 0 also hands
++ * the functions the disconnect they would get from a real unplug, so one can
++ * be stopped cleanly just before the UDC is unbound.
++ */
++static ssize_t soft_disconnect_store(struct device *pdev,
++				     struct device_attribute *attr,
++				     const char *buf, size_t size)
++{
++	struct gadget_info *gi = dev_get_drvdata(pdev);
++	struct usb_gadget *gadget;
++	bool disconnect;
++	int ret;
++
++	if (!gi)
++		return -ENODEV;
++
++	ret = strtobool(buf, &disconnect);
++	if (ret)
++		return ret;
++
++	mutex_lock(&gi->lock);
++	gadget = gi->cdev.gadget;
++	if (!gi->udc_name || !gadget) {
++		mutex_unlock(&gi->lock);
++		return -ENODEV;
++	}
++
++	if (disconnect) {
++		usb_gadget_disconnect(gadget);
++	} else {
++		if (gi->connected)
++			android_disconnect(gadget);
++		usb_gadget_connect(gadget);
++	}
++	mutex_unlock(&gi->lock);
++
++	return size;
++}
++
+ static DEVICE_ATTR(state, S_IRUGO, state_show, NULL);
+ static DEVICE_ATTR(event, S_IRUGO, event_show, NULL);
++static DEVICE_ATTR_WO(soft_disconnect);
+ 
+ static struct device_attribute *android_usb_attributes[] = {
+ 	&dev_attr_state,
+ 	&dev_attr_event,
++	&dev_attr_soft_disconnect,
+ 	NULL
+ };
+ 
+@@ -2038,7 +2083,11 @@ static int __init gadget_cfs_init(void)
+ 		return ret;
+ 
+ #ifdef CONFIG_USB_CONFIGFS_UEVENT
+-	android_class = class_create(THIS_MODULE, "android_usb");
++	/*
++	 * "usb_gadget", as on the vendor kernel: /sys/class/usb_gadget/android0
++	 * and the f_* function devices are the paths userspace looks for.
++	 */
++	android_class = class_create(THIS_MODULE, "usb_gadget");
+ 	if (IS_ERR(android_class))
+ 		return PTR_ERR(android_class);
+ 	
+-- 
+2.43.0
+

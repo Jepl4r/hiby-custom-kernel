@@ -1,0 +1,641 @@
+From b62bafa677fdb5deed06c6b0b06b15fffbcc79cb Mon Sep 17 00:00:00 2001
+From: Mattia D'Oronzo <doronzomattia26@icloud.com>
+Date: Mon, 5 Oct 2026 16:16:14 +0200
+Subject: [PATCH 03/13] power_supply: vendor property enum and sysfs tables
+
+The HiBy charger, PMIC and fuel gauge modules (mp2731, axp2101, cw2015)
+were built against a power_supply with the vendor's property list: 201
+properties in a fixed order, with their sysfs names and the text tables
+for the enumerated ones. The modules pass property numbers, so the enum
+has to match theirs entry for entry, including the vendor additions such
+as typec_power_role and usb_otg.
+---
+ drivers/power/power_supply_sysfs.c | 319 ++++++++++++++++++++++++-----
+ include/linux/power_supply.h       | 202 +++++++++++++++++-
+ 2 files changed, 465 insertions(+), 56 deletions(-)
+
+diff --git a/drivers/power/power_supply_sysfs.c b/drivers/power/power_supply_sysfs.c
+index ed2d7fd0..c87d2811 100644
+--- a/drivers/power/power_supply_sysfs.c
++++ b/drivers/power/power_supply_sysfs.c
+@@ -40,35 +40,62 @@
+ 
+ static struct device_attribute power_supply_attrs[];
+ 
++static const char * const power_supply_type_text[] = {
++	"Unknown", "Battery", "UPS", "Mains", "USB", "USB_DCP", "USB_CDP", "USB_ACA", "USB_C", "USB_PD", "USB_PD_DRP", "BrickID", "USB_HVDCP", "USB_HVDCP_3", "USB_HVDCP_3P5", "Wireless", "USB_FLOAT", "BMS", "Parallel", "Main", "Wipower", "USB_C_UFP", "USB_C_DFP", "Charge_Pump"
++};
++
++static const char * const power_supply_status_text[] = {
++	"Unknown", "Charging", "Discharging", "Not charging", "Full"
++};
++
++static const char * const power_supply_charge_type_text[] = {
++	"Unknown", "N/A", "Trickle", "Fast", "Taper"
++};
++
++static const char * const power_supply_health_text[] = {
++	"Unknown", "Good", "Overheat", "Dead", "Over voltage", "Unspecified failure", "Cold", "Watchdog timer expire", "Safety timer expire", "Over current", "Warm", "Cool", "Hot"
++};
++
++static const char * const power_supply_technology_text[] = {
++	"Unknown", "NiMH", "Li-ion", "Li-poly", "LiFe", "NiCd", "LiMn"
++};
++
++static const char * const power_supply_capacity_level_text[] = {
++	"Unknown", "Critical", "Low", "Normal", "High", "Full"
++};
++
++static const char * const power_supply_scope_text[] = {
++	"Unknown", "System", "Device"
++};
++
++static const char * const power_supply_usbc_text[] = {
++	"Nothing attached", "Sink attached", "Powered cable w/ sink", "Debug Accessory", "Audio Adapter", "Powered cable w/o sink", "Source attached (default current)", "Source attached (medium current)", "Source attached (high current)", "Non compliant"
++};
++
++static const char * const power_supply_usbc_pr_text[] = {
++	"none", "dual power role", "sink", "source"
++};
++
++static const char * const power_supply_typec_src_rp_text[] = {
++	"Rp-Default", "Rp-1.5A", "Rp-3A"
++};
++
++/*
++ * Prints a text table entry, or the raw number when a driver reports a value
++ * the table does not cover.
++ */
++static ssize_t power_supply_show_text(char *buf, const char * const *text,
++				      size_t n, int value)
++{
++	if (value < 0 || (size_t)value >= n)
++		return scnprintf(buf, PAGE_SIZE, "%d\n", value);
++	return scnprintf(buf, PAGE_SIZE, "%s\n", text[value]);
++}
++
+ static ssize_t power_supply_show_property(struct device *dev,
+ 					  struct device_attribute *attr,
+ 					  char *buf) {
+-	static char *type_text[] = {
+-		"Unknown", "Battery", "UPS", "Mains", "USB",
+-		"USB_DCP", "USB_CDP", "USB_ACA"
+-	};
+-	static char *status_text[] = {
+-		"Unknown", "Charging", "Discharging", "Not charging", "Full"
+-	};
+-	static char *charge_type[] = {
+-		"Unknown", "N/A", "Trickle", "Fast"
+-	};
+-	static char *health_text[] = {
+-		"Unknown", "Good", "Overheat", "Dead", "Over voltage",
+-		"Unspecified failure", "Cold", "Watchdog timer expire",
+-		"Safety timer expire"
+-	};
+-	static char *technology_text[] = {
+-		"Unknown", "NiMH", "Li-ion", "Li-poly", "LiFe", "NiCd",
+-		"LiMn"
+-	};
+-	static char *capacity_level_text[] = {
+-		"Unknown", "Critical", "Low", "Normal", "High", "Full"
+-	};
+-	static char *scope_text[] = {
+-		"Unknown", "System", "Device"
+-	};
+-	ssize_t ret = 0;
++	ssize_t ret;
+ 	struct power_supply *psy = dev_get_drvdata(dev);
+ 	const ptrdiff_t off = attr - power_supply_attrs;
+ 	union power_supply_propval value;
+@@ -82,31 +109,55 @@ static ssize_t power_supply_show_property(struct device *dev,
+ 			if (ret == -ENODATA)
+ 				dev_dbg(dev, "driver has no data for `%s' property\n",
+ 					attr->attr.name);
+-			else if (ret != -ENODEV)
+-				dev_err(dev, "driver failed to report `%s' property: %zd\n",
++			else if (ret != -ENODEV && ret != -EAGAIN)
++				dev_err_ratelimited(dev,
++					"driver failed to report `%s' property: %zd\n",
+ 					attr->attr.name, ret);
+ 			return ret;
+ 		}
+ 	}
+ 
+-	if (off == POWER_SUPPLY_PROP_STATUS)
+-		return sprintf(buf, "%s\n", status_text[value.intval]);
+-	else if (off == POWER_SUPPLY_PROP_CHARGE_TYPE)
+-		return sprintf(buf, "%s\n", charge_type[value.intval]);
+-	else if (off == POWER_SUPPLY_PROP_HEALTH)
+-		return sprintf(buf, "%s\n", health_text[value.intval]);
+-	else if (off == POWER_SUPPLY_PROP_TECHNOLOGY)
+-		return sprintf(buf, "%s\n", technology_text[value.intval]);
+-	else if (off == POWER_SUPPLY_PROP_CAPACITY_LEVEL)
+-		return sprintf(buf, "%s\n", capacity_level_text[value.intval]);
+-	else if (off == POWER_SUPPLY_PROP_TYPE)
+-		return sprintf(buf, "%s\n", type_text[value.intval]);
+-	else if (off == POWER_SUPPLY_PROP_SCOPE)
+-		return sprintf(buf, "%s\n", scope_text[value.intval]);
+-	else if (off >= POWER_SUPPLY_PROP_MODEL_NAME)
+-		return sprintf(buf, "%s\n", value.strval);
+-
+-	return sprintf(buf, "%d\n", value.intval);
++	switch (off) {
++	case POWER_SUPPLY_PROP_STATUS:
++		return power_supply_show_text(buf, power_supply_status_text,
++			ARRAY_SIZE(power_supply_status_text), value.intval);
++	case POWER_SUPPLY_PROP_CHARGE_TYPE:
++		return power_supply_show_text(buf, power_supply_charge_type_text,
++			ARRAY_SIZE(power_supply_charge_type_text), value.intval);
++	case POWER_SUPPLY_PROP_HEALTH:
++	case POWER_SUPPLY_PROP_DIE_HEALTH:
++	case POWER_SUPPLY_PROP_CONNECTOR_HEALTH:
++	case POWER_SUPPLY_PROP_SKIN_HEALTH:
++		return power_supply_show_text(buf, power_supply_health_text,
++			ARRAY_SIZE(power_supply_health_text), value.intval);
++	case POWER_SUPPLY_PROP_TECHNOLOGY:
++		return power_supply_show_text(buf, power_supply_technology_text,
++			ARRAY_SIZE(power_supply_technology_text), value.intval);
++	case POWER_SUPPLY_PROP_CAPACITY_LEVEL:
++		return power_supply_show_text(buf, power_supply_capacity_level_text,
++			ARRAY_SIZE(power_supply_capacity_level_text), value.intval);
++	case POWER_SUPPLY_PROP_TYPE:
++	case POWER_SUPPLY_PROP_REAL_TYPE:
++		return power_supply_show_text(buf, power_supply_type_text,
++			ARRAY_SIZE(power_supply_type_text), value.intval);
++	case POWER_SUPPLY_PROP_SCOPE:
++		return power_supply_show_text(buf, power_supply_scope_text,
++			ARRAY_SIZE(power_supply_scope_text), value.intval);
++	case POWER_SUPPLY_PROP_TYPEC_MODE:
++		return power_supply_show_text(buf, power_supply_usbc_text,
++			ARRAY_SIZE(power_supply_usbc_text), value.intval);
++	case POWER_SUPPLY_PROP_TYPEC_POWER_ROLE:
++		return power_supply_show_text(buf, power_supply_usbc_pr_text,
++			ARRAY_SIZE(power_supply_usbc_pr_text), value.intval);
++	case POWER_SUPPLY_PROP_TYPEC_SRC_RP:
++		return power_supply_show_text(buf, power_supply_typec_src_rp_text,
++			ARRAY_SIZE(power_supply_typec_src_rp_text), value.intval);
++	}
++
++	if (off >= POWER_SUPPLY_PROP_MODEL_NAME)
++		return scnprintf(buf, PAGE_SIZE, "%s\n", value.strval);
++
++	return scnprintf(buf, PAGE_SIZE, "%d\n", value.intval);
+ }
+ 
+ static ssize_t power_supply_store_property(struct device *dev,
+@@ -116,14 +167,42 @@ static ssize_t power_supply_store_property(struct device *dev,
+ 	struct power_supply *psy = dev_get_drvdata(dev);
+ 	const ptrdiff_t off = attr - power_supply_attrs;
+ 	union power_supply_propval value;
+-	long long_val;
+ 
+-	/* TODO: support other types than int */
+-	ret = kstrtol(buf, 10, &long_val);
+-	if (ret < 0)
+-		return ret;
++	switch (off) {
++	case POWER_SUPPLY_PROP_STATUS:
++		ret = sysfs_match_string(power_supply_status_text, buf);
++		break;
++	case POWER_SUPPLY_PROP_CHARGE_TYPE:
++		ret = sysfs_match_string(power_supply_charge_type_text, buf);
++		break;
++	case POWER_SUPPLY_PROP_HEALTH:
++		ret = sysfs_match_string(power_supply_health_text, buf);
++		break;
++	case POWER_SUPPLY_PROP_TECHNOLOGY:
++		ret = sysfs_match_string(power_supply_technology_text, buf);
++		break;
++	case POWER_SUPPLY_PROP_CAPACITY_LEVEL:
++		ret = sysfs_match_string(power_supply_capacity_level_text, buf);
++		break;
++	case POWER_SUPPLY_PROP_SCOPE:
++		ret = sysfs_match_string(power_supply_scope_text, buf);
++		break;
++	default:
++		ret = -EINVAL;
++	}
++
++	/* A number is accepted wherever a name is not. */
++	if (ret < 0) {
++		long long_val;
++
++		ret = kstrtol(buf, 10, &long_val);
++		if (ret < 0)
++			return ret;
++
++		ret = long_val;
++	}
+ 
+-	value.intval = long_val;
++	value.intval = ret;
+ 
+ 	ret = power_supply_set_property(psy, off, &value);
+ 	if (ret < 0)
+@@ -195,12 +274,148 @@ static struct device_attribute power_supply_attrs[] = {
+ 	POWER_SUPPLY_ATTR(time_to_full_avg),
+ 	POWER_SUPPLY_ATTR(type),
+ 	POWER_SUPPLY_ATTR(scope),
++	POWER_SUPPLY_ATTR(precharge_current),
+ 	POWER_SUPPLY_ATTR(charge_term_current),
+ 	POWER_SUPPLY_ATTR(calibrate),
++	POWER_SUPPLY_ATTR(usb_hc),
++	POWER_SUPPLY_ATTR(usb_otg),
++	POWER_SUPPLY_ATTR(charge_enabled),
++	POWER_SUPPLY_ATTR(set_ship_mode),
++	POWER_SUPPLY_ATTR(real_type),
++	POWER_SUPPLY_ATTR(charge_now_raw),
++	POWER_SUPPLY_ATTR(charge_now_error),
++	POWER_SUPPLY_ATTR(capacity_raw),
++	POWER_SUPPLY_ATTR(battery_charging_enabled),
++	POWER_SUPPLY_ATTR(charging_enabled),
++	POWER_SUPPLY_ATTR(step_charging_enabled),
++	POWER_SUPPLY_ATTR(step_charging_step),
++	POWER_SUPPLY_ATTR(pin_enabled),
++	POWER_SUPPLY_ATTR(input_suspend),
++	POWER_SUPPLY_ATTR(input_voltage_regulation),
++	POWER_SUPPLY_ATTR(input_current_max),
++	POWER_SUPPLY_ATTR(input_current_trim),
++	POWER_SUPPLY_ATTR(input_current_settled),
++	POWER_SUPPLY_ATTR(input_voltage_settled),
++	POWER_SUPPLY_ATTR(bypass_vchg_loop_debouncer),
++	POWER_SUPPLY_ATTR(charge_counter_shadow),
++	POWER_SUPPLY_ATTR(hi_power),
++	POWER_SUPPLY_ATTR(low_power),
++	POWER_SUPPLY_ATTR(temp_cool),
++	POWER_SUPPLY_ATTR(temp_warm),
++	POWER_SUPPLY_ATTR(temp_cold),
++	POWER_SUPPLY_ATTR(temp_hot),
++	POWER_SUPPLY_ATTR(system_temp_level),
++	POWER_SUPPLY_ATTR(resistance),
++	POWER_SUPPLY_ATTR(resistance_capacitive),
++	POWER_SUPPLY_ATTR(resistance_id),
++	POWER_SUPPLY_ATTR(resistance_now),
++	POWER_SUPPLY_ATTR(flash_current_max),
++	POWER_SUPPLY_ATTR(update_now),
++	POWER_SUPPLY_ATTR(esr_count),
++	POWER_SUPPLY_ATTR(buck_freq),
++	POWER_SUPPLY_ATTR(boost_current),
++	POWER_SUPPLY_ATTR(safety_timer_enabled),
++	POWER_SUPPLY_ATTR(charge_done),
++	POWER_SUPPLY_ATTR(flash_active),
++	POWER_SUPPLY_ATTR(flash_trigger),
++	POWER_SUPPLY_ATTR(force_tlim),
++	POWER_SUPPLY_ATTR(dp_dm),
++	POWER_SUPPLY_ATTR(input_current_limited),
++	POWER_SUPPLY_ATTR(input_current_now),
++	POWER_SUPPLY_ATTR(charge_qnovo_enable),
++	POWER_SUPPLY_ATTR(current_qnovo),
++	POWER_SUPPLY_ATTR(voltage_qnovo),
++	POWER_SUPPLY_ATTR(rerun_aicl),
++	POWER_SUPPLY_ATTR(cycle_count_id),
++	POWER_SUPPLY_ATTR(safety_timer_expired),
++	POWER_SUPPLY_ATTR(restricted_charging),
++	POWER_SUPPLY_ATTR(current_capability),
++	POWER_SUPPLY_ATTR(typec_mode),
++	POWER_SUPPLY_ATTR(typec_cc_orientation),
++	POWER_SUPPLY_ATTR(typec_power_role),
++	POWER_SUPPLY_ATTR(typec_src_rp),
++	POWER_SUPPLY_ATTR(pd_allowed),
++	POWER_SUPPLY_ATTR(pd_active),
++	POWER_SUPPLY_ATTR(pd_in_hard_reset),
++	POWER_SUPPLY_ATTR(pd_current_max),
++	POWER_SUPPLY_ATTR(pd_usb_suspend_supported),
++	POWER_SUPPLY_ATTR(charger_temp),
++	POWER_SUPPLY_ATTR(charger_temp_max),
++	POWER_SUPPLY_ATTR(parallel_disable),
++	POWER_SUPPLY_ATTR(pe_start),
++	POWER_SUPPLY_ATTR(soc_reporting_ready),
++	POWER_SUPPLY_ATTR(debug_battery),
++	POWER_SUPPLY_ATTR(fcc_delta),
++	POWER_SUPPLY_ATTR(icl_reduction),
++	POWER_SUPPLY_ATTR(parallel_mode),
++	POWER_SUPPLY_ATTR(die_health),
++	POWER_SUPPLY_ATTR(connector_health),
++	POWER_SUPPLY_ATTR(ctm_current_max),
++	POWER_SUPPLY_ATTR(hw_current_max),
++	POWER_SUPPLY_ATTR(pr_swap),
++	POWER_SUPPLY_ATTR(cc_step),
++	POWER_SUPPLY_ATTR(cc_step_sel),
++	POWER_SUPPLY_ATTR(sw_jeita_enabled),
++	POWER_SUPPLY_ATTR(pd_voltage_max),
++	POWER_SUPPLY_ATTR(pd_voltage_min),
++	POWER_SUPPLY_ATTR(sdp_current_max),
++	POWER_SUPPLY_ATTR(connector_type),
++	POWER_SUPPLY_ATTR(parallel_batfet_mode),
++	POWER_SUPPLY_ATTR(parallel_fcc_max),
++	POWER_SUPPLY_ATTR(min_icl),
++	POWER_SUPPLY_ATTR(moisture_detected),
++	POWER_SUPPLY_ATTR(batt_profile_version),
++	POWER_SUPPLY_ATTR(batt_full_current),
++	POWER_SUPPLY_ATTR(recharge_soc),
++	POWER_SUPPLY_ATTR(hvdcp_opti_allowed),
++	POWER_SUPPLY_ATTR(smb_en_mode),
++	POWER_SUPPLY_ATTR(smb_en_reason),
++	POWER_SUPPLY_ATTR(esr_actual),
++	POWER_SUPPLY_ATTR(esr_nominal),
++	POWER_SUPPLY_ATTR(soh),
++	POWER_SUPPLY_ATTR(clear_soh),
++	POWER_SUPPLY_ATTR(force_recharge),
++	POWER_SUPPLY_ATTR(fcc_stepper_enable),
++	POWER_SUPPLY_ATTR(toggle_stat),
++	POWER_SUPPLY_ATTR(main_fcc_max),
++	POWER_SUPPLY_ATTR(fg_reset),
++	POWER_SUPPLY_ATTR(qc_opti_disable),
++	POWER_SUPPLY_ATTR(cc_soc),
++	POWER_SUPPLY_ATTR(batt_age_level),
++	POWER_SUPPLY_ATTR(voltage_vph),
++	POWER_SUPPLY_ATTR(chip_version),
++	POWER_SUPPLY_ATTR(therm_icl_limit),
++	POWER_SUPPLY_ATTR(dc_reset),
++	POWER_SUPPLY_ATTR(scale_mode_en),
++	POWER_SUPPLY_ATTR(voltage_max_limit),
++	POWER_SUPPLY_ATTR(real_capacity),
++	POWER_SUPPLY_ATTR(esr_sw_control),
++	POWER_SUPPLY_ATTR(force_main_icl),
++	POWER_SUPPLY_ATTR(force_main_fcc),
++	POWER_SUPPLY_ATTR(comp_clamp_level),
++	POWER_SUPPLY_ATTR(adapter_cc_mode),
++	POWER_SUPPLY_ATTR(skin_health),
++	POWER_SUPPLY_ATTR(apsd_rerun),
++	POWER_SUPPLY_ATTR(apsd_timeout),
++	POWER_SUPPLY_ATTR(cp_status1),
++	POWER_SUPPLY_ATTR(cp_status2),
++	POWER_SUPPLY_ATTR(cp_enable),
++	POWER_SUPPLY_ATTR(cp_switcher_en),
++	POWER_SUPPLY_ATTR(cp_die_temp),
++	POWER_SUPPLY_ATTR(cp_isns),
++	POWER_SUPPLY_ATTR(cp_isns_slave),
++	POWER_SUPPLY_ATTR(cp_toggle_switcher),
++	POWER_SUPPLY_ATTR(cp_irq_status),
++	POWER_SUPPLY_ATTR(cp_ilim),
++	POWER_SUPPLY_ATTR(irq_status),
++	POWER_SUPPLY_ATTR(parallel_output_mode),
++	POWER_SUPPLY_ATTR(charge_counter_ext),
+ 	/* Properties of type `const char *' */
+ 	POWER_SUPPLY_ATTR(model_name),
+ 	POWER_SUPPLY_ATTR(manufacturer),
+ 	POWER_SUPPLY_ATTR(serial_number),
++	POWER_SUPPLY_ATTR(battery_type),
++	POWER_SUPPLY_ATTR(cycle_counts),
+ };
+ 
+ static struct attribute *
+diff --git a/include/linux/power_supply.h b/include/linux/power_supply.h
+index ef9f1592..0a243812 100644
+--- a/include/linux/power_supply.h
++++ b/include/linux/power_supply.h
+@@ -45,6 +45,7 @@ enum {
+ 	POWER_SUPPLY_CHARGE_TYPE_NONE,
+ 	POWER_SUPPLY_CHARGE_TYPE_TRICKLE,
+ 	POWER_SUPPLY_CHARGE_TYPE_FAST,
++	POWER_SUPPLY_CHARGE_TYPE_TAPER,
+ };
+ 
+ enum {
+@@ -57,6 +58,10 @@ enum {
+ 	POWER_SUPPLY_HEALTH_COLD,
+ 	POWER_SUPPLY_HEALTH_WATCHDOG_TIMER_EXPIRE,
+ 	POWER_SUPPLY_HEALTH_SAFETY_TIMER_EXPIRE,
++	POWER_SUPPLY_HEALTH_OVERCURRENT,
++	POWER_SUPPLY_HEALTH_WARM,
++	POWER_SUPPLY_HEALTH_COOL,
++	POWER_SUPPLY_HEALTH_HOT,
+ };
+ 
+ enum {
+@@ -84,6 +89,12 @@ enum {
+ 	POWER_SUPPLY_SCOPE_DEVICE,
+ };
+ 
++/*
++ * The order and the values follow the vendor kernel: the stock charger, fuel
++ * gauge and Type-C modules pass these numbers directly, so an entry must never
++ * be moved or removed. power_supply_attrs[] in power_supply_sysfs.c follows the
++ * same order.
++ */
+ enum power_supply_property {
+ 	/* Properties of type `int' */
+ 	POWER_SUPPLY_PROP_STATUS = 0,
+@@ -128,9 +139,9 @@ enum power_supply_property {
+ 	POWER_SUPPLY_PROP_ENERGY_EMPTY,
+ 	POWER_SUPPLY_PROP_ENERGY_NOW,
+ 	POWER_SUPPLY_PROP_ENERGY_AVG,
+-	POWER_SUPPLY_PROP_CAPACITY, /* in percents! */
+-	POWER_SUPPLY_PROP_CAPACITY_ALERT_MIN, /* in percents! */
+-	POWER_SUPPLY_PROP_CAPACITY_ALERT_MAX, /* in percents! */
++	POWER_SUPPLY_PROP_CAPACITY,
++	POWER_SUPPLY_PROP_CAPACITY_ALERT_MIN,
++	POWER_SUPPLY_PROP_CAPACITY_ALERT_MAX,
+ 	POWER_SUPPLY_PROP_CAPACITY_LEVEL,
+ 	POWER_SUPPLY_PROP_TEMP,
+ 	POWER_SUPPLY_PROP_TEMP_MAX,
+@@ -144,14 +155,150 @@ enum power_supply_property {
+ 	POWER_SUPPLY_PROP_TIME_TO_EMPTY_AVG,
+ 	POWER_SUPPLY_PROP_TIME_TO_FULL_NOW,
+ 	POWER_SUPPLY_PROP_TIME_TO_FULL_AVG,
+-	POWER_SUPPLY_PROP_TYPE, /* use power_supply.type instead */
++	POWER_SUPPLY_PROP_TYPE,
+ 	POWER_SUPPLY_PROP_SCOPE,
++	POWER_SUPPLY_PROP_PRECHARGE_CURRENT,
+ 	POWER_SUPPLY_PROP_CHARGE_TERM_CURRENT,
+ 	POWER_SUPPLY_PROP_CALIBRATE,
++	POWER_SUPPLY_PROP_USB_HC,
++	POWER_SUPPLY_PROP_USB_OTG,
++	POWER_SUPPLY_PROP_CHARGE_ENABLED,
++	POWER_SUPPLY_PROP_SET_SHIP_MODE,
++	POWER_SUPPLY_PROP_REAL_TYPE,
++	POWER_SUPPLY_PROP_CHARGE_NOW_RAW,
++	POWER_SUPPLY_PROP_CHARGE_NOW_ERROR,
++	POWER_SUPPLY_PROP_CAPACITY_RAW,
++	POWER_SUPPLY_PROP_BATTERY_CHARGING_ENABLED,
++	POWER_SUPPLY_PROP_CHARGING_ENABLED,
++	POWER_SUPPLY_PROP_STEP_CHARGING_ENABLED,
++	POWER_SUPPLY_PROP_STEP_CHARGING_STEP,
++	POWER_SUPPLY_PROP_PIN_ENABLED,
++	POWER_SUPPLY_PROP_INPUT_SUSPEND,
++	POWER_SUPPLY_PROP_INPUT_VOLTAGE_REGULATION,
++	POWER_SUPPLY_PROP_INPUT_CURRENT_MAX,
++	POWER_SUPPLY_PROP_INPUT_CURRENT_TRIM,
++	POWER_SUPPLY_PROP_INPUT_CURRENT_SETTLED,
++	POWER_SUPPLY_PROP_INPUT_VOLTAGE_SETTLED,
++	POWER_SUPPLY_PROP_BYPASS_VCHG_LOOP_DEBOUNCER,
++	POWER_SUPPLY_PROP_CHARGE_COUNTER_SHADOW,
++	POWER_SUPPLY_PROP_HI_POWER,
++	POWER_SUPPLY_PROP_LOW_POWER,
++	POWER_SUPPLY_PROP_TEMP_COOL,
++	POWER_SUPPLY_PROP_TEMP_WARM,
++	POWER_SUPPLY_PROP_TEMP_COLD,
++	POWER_SUPPLY_PROP_TEMP_HOT,
++	POWER_SUPPLY_PROP_SYSTEM_TEMP_LEVEL,
++	POWER_SUPPLY_PROP_RESISTANCE,
++	POWER_SUPPLY_PROP_RESISTANCE_CAPACITIVE,
++	POWER_SUPPLY_PROP_RESISTANCE_ID,
++	POWER_SUPPLY_PROP_RESISTANCE_NOW,
++	POWER_SUPPLY_PROP_FLASH_CURRENT_MAX,
++	POWER_SUPPLY_PROP_UPDATE_NOW,
++	POWER_SUPPLY_PROP_ESR_COUNT,
++	POWER_SUPPLY_PROP_BUCK_FREQ,
++	POWER_SUPPLY_PROP_BOOST_CURRENT,
++	POWER_SUPPLY_PROP_SAFETY_TIMER_ENABLED,
++	POWER_SUPPLY_PROP_CHARGE_DONE,
++	POWER_SUPPLY_PROP_FLASH_ACTIVE,
++	POWER_SUPPLY_PROP_FLASH_TRIGGER,
++	POWER_SUPPLY_PROP_FORCE_TLIM,
++	POWER_SUPPLY_PROP_DP_DM,
++	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMITED,
++	POWER_SUPPLY_PROP_INPUT_CURRENT_NOW,
++	POWER_SUPPLY_PROP_CHARGE_QNOVO_ENABLE,
++	POWER_SUPPLY_PROP_CURRENT_QNOVO,
++	POWER_SUPPLY_PROP_VOLTAGE_QNOVO,
++	POWER_SUPPLY_PROP_RERUN_AICL,
++	POWER_SUPPLY_PROP_CYCLE_COUNT_ID,
++	POWER_SUPPLY_PROP_SAFETY_TIMER_EXPIRED,
++	POWER_SUPPLY_PROP_RESTRICTED_CHARGING,
++	POWER_SUPPLY_PROP_CURRENT_CAPABILITY,
++	POWER_SUPPLY_PROP_TYPEC_MODE,
++	POWER_SUPPLY_PROP_TYPEC_CC_ORIENTATION,
++	POWER_SUPPLY_PROP_TYPEC_POWER_ROLE,
++	POWER_SUPPLY_PROP_TYPEC_SRC_RP,
++	POWER_SUPPLY_PROP_PD_ALLOWED,
++	POWER_SUPPLY_PROP_PD_ACTIVE,
++	POWER_SUPPLY_PROP_PD_IN_HARD_RESET,
++	POWER_SUPPLY_PROP_PD_CURRENT_MAX,
++	POWER_SUPPLY_PROP_PD_USB_SUSPEND_SUPPORTED,
++	POWER_SUPPLY_PROP_CHARGER_TEMP,
++	POWER_SUPPLY_PROP_CHARGER_TEMP_MAX,
++	POWER_SUPPLY_PROP_PARALLEL_DISABLE,
++	POWER_SUPPLY_PROP_PE_START,
++	POWER_SUPPLY_PROP_SOC_REPORTING_READY,
++	POWER_SUPPLY_PROP_DEBUG_BATTERY,
++	POWER_SUPPLY_PROP_FCC_DELTA,
++	POWER_SUPPLY_PROP_ICL_REDUCTION,
++	POWER_SUPPLY_PROP_PARALLEL_MODE,
++	POWER_SUPPLY_PROP_DIE_HEALTH,
++	POWER_SUPPLY_PROP_CONNECTOR_HEALTH,
++	POWER_SUPPLY_PROP_CTM_CURRENT_MAX,
++	POWER_SUPPLY_PROP_HW_CURRENT_MAX,
++	POWER_SUPPLY_PROP_PR_SWAP,
++	POWER_SUPPLY_PROP_CC_STEP,
++	POWER_SUPPLY_PROP_CC_STEP_SEL,
++	POWER_SUPPLY_PROP_SW_JEITA_ENABLED,
++	POWER_SUPPLY_PROP_PD_VOLTAGE_MAX,
++	POWER_SUPPLY_PROP_PD_VOLTAGE_MIN,
++	POWER_SUPPLY_PROP_SDP_CURRENT_MAX,
++	POWER_SUPPLY_PROP_CONNECTOR_TYPE,
++	POWER_SUPPLY_PROP_PARALLEL_BATFET_MODE,
++	POWER_SUPPLY_PROP_PARALLEL_FCC_MAX,
++	POWER_SUPPLY_PROP_MIN_ICL,
++	POWER_SUPPLY_PROP_MOISTURE_DETECTED,
++	POWER_SUPPLY_PROP_BATT_PROFILE_VERSION,
++	POWER_SUPPLY_PROP_BATT_FULL_CURRENT,
++	POWER_SUPPLY_PROP_RECHARGE_SOC,
++	POWER_SUPPLY_PROP_HVDCP_OPTI_ALLOWED,
++	POWER_SUPPLY_PROP_SMB_EN_MODE,
++	POWER_SUPPLY_PROP_SMB_EN_REASON,
++	POWER_SUPPLY_PROP_ESR_ACTUAL,
++	POWER_SUPPLY_PROP_ESR_NOMINAL,
++	POWER_SUPPLY_PROP_SOH,
++	POWER_SUPPLY_PROP_CLEAR_SOH,
++	POWER_SUPPLY_PROP_FORCE_RECHARGE,
++	POWER_SUPPLY_PROP_FCC_STEPPER_ENABLE,
++	POWER_SUPPLY_PROP_TOGGLE_STAT,
++	POWER_SUPPLY_PROP_MAIN_FCC_MAX,
++	POWER_SUPPLY_PROP_FG_RESET,
++	POWER_SUPPLY_PROP_QC_OPTI_DISABLE,
++	POWER_SUPPLY_PROP_CC_SOC,
++	POWER_SUPPLY_PROP_BATT_AGE_LEVEL,
++	POWER_SUPPLY_PROP_VOLTAGE_VPH,
++	POWER_SUPPLY_PROP_CHIP_VERSION,
++	POWER_SUPPLY_PROP_THERM_ICL_LIMIT,
++	POWER_SUPPLY_PROP_DC_RESET,
++	POWER_SUPPLY_PROP_SCALE_MODE_EN,
++	POWER_SUPPLY_PROP_VOLTAGE_MAX_LIMIT,
++	POWER_SUPPLY_PROP_REAL_CAPACITY,
++	POWER_SUPPLY_PROP_ESR_SW_CONTROL,
++	POWER_SUPPLY_PROP_FORCE_MAIN_ICL,
++	POWER_SUPPLY_PROP_FORCE_MAIN_FCC,
++	POWER_SUPPLY_PROP_COMP_CLAMP_LEVEL,
++	POWER_SUPPLY_PROP_ADAPTER_CC_MODE,
++	POWER_SUPPLY_PROP_SKIN_HEALTH,
++	POWER_SUPPLY_PROP_APSD_RERUN,
++	POWER_SUPPLY_PROP_APSD_TIMEOUT,
++	POWER_SUPPLY_PROP_CP_STATUS1,
++	POWER_SUPPLY_PROP_CP_STATUS2,
++	POWER_SUPPLY_PROP_CP_ENABLE,
++	POWER_SUPPLY_PROP_CP_SWITCHER_EN,
++	POWER_SUPPLY_PROP_CP_DIE_TEMP,
++	POWER_SUPPLY_PROP_CP_ISNS,
++	POWER_SUPPLY_PROP_CP_ISNS_SLAVE,
++	POWER_SUPPLY_PROP_CP_TOGGLE_SWITCHER,
++	POWER_SUPPLY_PROP_CP_IRQ_STATUS,
++	POWER_SUPPLY_PROP_CP_ILIM,
++	POWER_SUPPLY_PROP_IRQ_STATUS,
++	POWER_SUPPLY_PROP_PARALLEL_OUTPUT_MODE,
++	POWER_SUPPLY_PROP_CHARGE_COUNTER_EXT,
+ 	/* Properties of type `const char *' */
+ 	POWER_SUPPLY_PROP_MODEL_NAME,
+ 	POWER_SUPPLY_PROP_MANUFACTURER,
+ 	POWER_SUPPLY_PROP_SERIAL_NUMBER,
++	POWER_SUPPLY_PROP_BATTERY_TYPE,
++	POWER_SUPPLY_PROP_CYCLE_COUNTS,
+ };
+ 
+ enum power_supply_type {
+@@ -163,6 +310,53 @@ enum power_supply_type {
+ 	POWER_SUPPLY_TYPE_USB_DCP,	/* Dedicated Charging Port */
+ 	POWER_SUPPLY_TYPE_USB_CDP,	/* Charging Downstream Port */
+ 	POWER_SUPPLY_TYPE_USB_ACA,	/* Accessory Charger Adapters */
++	POWER_SUPPLY_TYPE_USB_TYPE_C,	/* Type C Port */
++	POWER_SUPPLY_TYPE_USB_PD,	/* Power Delivery Port */
++	POWER_SUPPLY_TYPE_USB_PD_DRP,	/* PD Dual Role Port */
++	POWER_SUPPLY_TYPE_APPLE_BRICK_ID,	/* Apple Charging Method */
++	POWER_SUPPLY_TYPE_USB_HVDCP,	/* High Voltage DCP */
++	POWER_SUPPLY_TYPE_USB_HVDCP_3,	/* Efficient High Voltage DCP */
++	POWER_SUPPLY_TYPE_USB_HVDCP_3P5,
++	POWER_SUPPLY_TYPE_WIRELESS,
++	POWER_SUPPLY_TYPE_USB_FLOAT,	/* Floating charger */
++	POWER_SUPPLY_TYPE_BMS,
++	POWER_SUPPLY_TYPE_PARALLEL,
++	POWER_SUPPLY_TYPE_MAIN,
++	POWER_SUPPLY_TYPE_WIPOWER,
++	POWER_SUPPLY_TYPE_UFP,
++	POWER_SUPPLY_TYPE_DFP,
++	POWER_SUPPLY_TYPE_CHARGE_PUMP,
++};
++
++/* Value of POWER_SUPPLY_PROP_TYPEC_MODE */
++enum power_supply_typec_mode {
++	POWER_SUPPLY_TYPEC_NONE,
++	/* Acting as source */
++	POWER_SUPPLY_TYPEC_SINK,		/* Rd only */
++	POWER_SUPPLY_TYPEC_SINK_POWERED_CABLE,	/* Rd/Ra */
++	POWER_SUPPLY_TYPEC_SINK_DEBUG_ACCESSORY,/* Rd/Rd */
++	POWER_SUPPLY_TYPEC_SINK_AUDIO_ADAPTER,	/* Ra/Ra */
++	POWER_SUPPLY_TYPEC_POWERED_CABLE_ONLY,	/* Ra only */
++	/* Acting as sink */
++	POWER_SUPPLY_TYPEC_SOURCE_DEFAULT,	/* Rp default */
++	POWER_SUPPLY_TYPEC_SOURCE_MEDIUM,	/* Rp 1.5A */
++	POWER_SUPPLY_TYPEC_SOURCE_HIGH,		/* Rp 3A */
++	POWER_SUPPLY_TYPEC_NON_COMPLIANT,
++};
++
++/* Value of POWER_SUPPLY_PROP_TYPEC_SRC_RP */
++enum power_supply_typec_src_rp {
++	POWER_SUPPLY_TYPEC_SRC_RP_STD,
++	POWER_SUPPLY_TYPEC_SRC_RP_1P5A,
++	POWER_SUPPLY_TYPEC_SRC_RP_3A,
++};
++
++/* Value of POWER_SUPPLY_PROP_TYPEC_POWER_ROLE */
++enum power_supply_typec_power_role {
++	POWER_SUPPLY_TYPEC_PR_NONE,		/* CC lines in high-Z */
++	POWER_SUPPLY_TYPEC_PR_DUAL,
++	POWER_SUPPLY_TYPEC_PR_SINK,
++	POWER_SUPPLY_TYPEC_PR_SOURCE,
+ };
+ 
+ enum power_supply_notifier_events {
+-- 
+2.43.0
+
