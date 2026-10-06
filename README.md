@@ -38,7 +38,7 @@ The method, the Docker environment and three patches (0001, 0002, 0013) come fro
   hiby-custom-kernel/           this repository
     build.sh                    the build
     docker/Dockerfile           the environment (Debian bullseye, amd64)
-    patches/                    0001-0013, all applied, in order
+    patches/                    0001-0014, all applied, in order
     configs/                    configuration fragments, MODEL-*.config
     boards/MODEL/               one folder per player:
       modules-need.txt            the symbols the HiBy modules import
@@ -128,6 +128,7 @@ All of them are applied for every board; on the R1, 0004 is not built (no `CONFI
 | 0011 | gpiolib: a GPIO used as an interrupt can still be driven, as on the stock kernel (GT9xx touch reset after suspend) |
 | 0012 | **DMA to peripherals as on the stock kernel**: transfer size chosen by the controller and one full burst per request (RDIL). The SDK gives the AIC one word per request |
 | 0013 | memory: no HighAtomic reserve when a pageblock is nearly the whole zone (with `FORCE_MAX_ZONEORDER=15` a pageblock is 64 MB, the zone 56) (MatthewBriggs) |
+| 0014 | brcmfmac: the signal of the link in station mode, read with `GET_RSSI` when the firmware's `sta_info` has none, so `wpa_cli signal_poll` reports it |
 
 ## Configuration
 The fragments of the two boards differ only where their stock kernels do: the R1's has no Type-C class and no memory compaction. The two stock kernels are otherwise the same build, function for function.

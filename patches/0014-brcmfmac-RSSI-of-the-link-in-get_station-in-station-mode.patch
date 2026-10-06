@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Mattia D'Oronzo <doronzomattia26@icloud.com>
+Date: Tue, 6 Oct 2026 17:55:00 +0200
+Subject: [PATCH 14/14] brcmfmac: RSSI of the link in get_station in station
+ mode
+
+In 4.4 brcmfmac fills the signal of get_station only from the per-antenna
+RSSI that sta_info returns for the peer. Connected to an AP, the BCM43430
+firmware can return none, so nl80211 reports no signal and
+wpa_supplicant's signal_poll gives RSSI=0. When the signal is still
+missing on a connected station interface, ask the firmware for the RSSI of
+the link with BRCMF_C_GET_RSSI, which later kernels also do.
+---
+ drivers/net/wireless/brcm80211/brcmfmac/cfg80211.c | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/drivers/net/wireless/brcm80211/brcmfmac/cfg80211.c b/drivers/net/wireless/brcm80211/brcmfmac/cfg80211.c
+--- a/drivers/net/wireless/brcm80211/brcmfmac/cfg80211.c
++++ b/drivers/net/wireless/brcm80211/brcmfmac/cfg80211.c
+@@ -2425,6 +2425,7 @@
+ 	u32 is_tdls_peer;
+ 	s32 total_rssi;
+ 	s32 count_rssi;
++	struct brcmf_scb_val_le scb_val;
+ 	u32 i;
+ 
+ 	brcmf_dbg(TRACE, "Enter, MAC %pM\n", mac);
+@@ -2508,6 +2509,20 @@
+ 		}
+ 	}
+ done:
++	/* In station mode the firmware can leave the per-antenna RSSI of the
++	 * AP empty, or fail sta_info: the RSSI of the link is then asked for
++	 * directly.
++	 */
++	if (!(sinfo->filled & BIT(NL80211_STA_INFO_SIGNAL)) &&
++	    test_bit(BRCMF_VIF_STATUS_CONNECTED, &ifp->vif->sme_state)) {
++		memset(&scb_val, 0, sizeof(scb_val));
++		if (!brcmf_fil_cmd_data_get(ifp, BRCMF_C_GET_RSSI, &scb_val,
++					    sizeof(scb_val))) {
++			sinfo->filled |= BIT(NL80211_STA_INFO_SIGNAL);
++			sinfo->signal = le32_to_cpu(scb_val.val);
++			err = 0;
++		}
++	}
+ 	brcmf_dbg(TRACE, "Exit\n");
+ 	return err;
+ }
+-- 
+2.39.0
