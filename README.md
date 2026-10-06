@@ -1,4 +1,4 @@
-# Linux 4.4.94+ for HiBy X1600 players
+﻿# Linux 4.4.94+ for HiBy X1600 players
 
 A kit to rebuild the kernel of the HiBy players built on the **Ingenic X1600** from Ingenic's public SDK and put it into a firmware image, for anyone making custom firmware for them.
 
@@ -25,7 +25,7 @@ The method, the Docker environment and three patches (0001, 0002, 0013) come fro
 - **Anything from HiBy's firmware:** the stock device trees, their symbol tables, the closed modules, the firmware blobs and the stock scripts. `tools/extract-stock.py` takes what the build needs out of the official firmware.
 
 ## Requirements
-- Docker. On Apple Silicon Macs: Docker Desktop with "Use Rosetta for x86_64/amd64 emulation" enabled.
+- Docker.
 - The SDK tarball.
 - The stock firmware of the player (its `.upt`), or just its stock kernel image.
 - Python 3 and `7z` (macOS: `brew install p7zip`). Optional: `pip install vmlinux-to-elf`, for the full symbol comparison.
@@ -93,7 +93,7 @@ What the build makes, and where it goes in the stock firmware:
 
 | from | to |
 |---|---|
-| `out/xImage-MODEL` | the kernel image of the `.upt`, in place of the stock one; not larger than it, which is all the room the kernel partition is known to have |
+| `out/xImage-MODEL` | the kernel image of the `.upt` |
 | `out/modules-MODEL/*.ko` | `/module_driver` |
 | `rootfs/` and `boards/MODEL/rootfs/` | the root of the rootfs; scripts executable |
 
