@@ -1,7 +1,7 @@
 # Symbols the HiBy modules loaded before ours export, which a module built
 # here may use: utils.ko (gpio_set_func, param_gpio_ops, gpio_to_str),
-# soc_pwm.ko (pwm2_*), soc_msc.ko, soc_utils.ko, and for the sound card
-# soc_aic.ko and codec_cs43131.ko.
+# soc_pwm.ko (pwm2_*), soc_adc.ko (adc_*), soc_msc.ko, soc_utils.ko, and for
+# the sound card soc_aic.ko and codec_cs43131.ko.
 jzmmc_manual_detect
 ingenic_rtc32k_disable
 ingenic_rtc32k_enable
@@ -14,3 +14,6 @@ pwm2_request
 pwm2_config
 pwm2_set_level
 pwm2_release
+adc_enable
+adc_disable
+adc_read_channel_voltage

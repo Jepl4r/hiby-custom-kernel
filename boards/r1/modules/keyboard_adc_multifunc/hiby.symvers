@@ -1,0 +1,3 @@
+0x00000000	adc_enable	soc_adc	EXPORT_SYMBOL
+0x00000000	adc_disable	soc_adc	EXPORT_SYMBOL
+0x00000000	adc_read_channel_voltage	soc_adc	EXPORT_SYMBOL

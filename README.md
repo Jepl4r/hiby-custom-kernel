@@ -13,7 +13,7 @@ On both players the resulting kernel:
 - **uses the board's original device tree**, byte for byte;
 - **adds what the stock kernel lacks:** compressed swap in RAM (zram, LZ4), about 1.1 MB of RAM freed and the deadline I/O scheduler;
 - **can replace the closed Wi-Fi/Bluetooth driver** `cywdhd.ko` with mainline `brcmfmac` and a small open board module, `bcm_wlbt_power` (see [Wi-Fi and Bluetooth](#wi-fi-and-bluetooth-without-cywdhd));
-- **comes with open sources for eleven of HiBy's closed modules**, drop-in replacements with the same file names, parameters and behaviour: the two sound card drivers and nine small ones (see [Open HiBy modules](#open-hiby-modules)).
+- **comes with open sources for fifteen of HiBy's closed modules**, drop-in replacements with the same file names, parameters and behaviour: the two sound card drivers and thirteen smaller ones (see [Open HiBy modules](#open-hiby-modules)).
 
 Working on both players: boot, display and touch, audio (3.5 mm, the R3 Pro II's balanced output, DSD), Wi-Fi, Bluetooth, microSD, USB (ADB, mass storage, USB DAC, OTG), charging and LEDs.
 
@@ -48,7 +48,8 @@ The method, the Docker environment and three patches (0001, 0002, 0013) come fro
       stock.dtb, stock.kallsyms   extracted from the stock firmware, not in git
     modules/                    modules for every board, built out of tree:
       bcm_wlbt_power/             Wi-Fi/Bluetooth power for brcmfmac
-      soc_utils/, pwm_backlight/, sa_config_module/   open HiBy modules
+      soc_utils/, pwm_backlight/, sa_config_module/,
+      sa_sound_switch/, sa_earpods_adc/               open HiBy modules
     rootfs/                     files for the root filesystem of every player
     tools/extract-stock.py      device tree and symbols from the stock firmware
     tools/compare.py            comparison with the stock kernel
@@ -218,6 +219,10 @@ Open sources for closed modules of the stock firmware. Each `.ko` has the vendor
 | `keyboard_adc.ko` | `boards/r3proii/modules` | R3 Pro II | the keys on the ADC resistor ladder (`soc_adc.ko`), as the input device `jz adc keyboard` |
 | `tcs1421_add.ko` | `boards/r1/modules` | R1 | the TCS1421 Type-C port controller, its role (`Sink`, `Source`, `StrongDRP`, `NormalDRP`) set on two pins through `/sys/devices/platform/tcs1421/tcs1421_cfg` |
 | `leds_pwm_add.ko` | `boards/r1/modules` | R1 | the red and blue LEDs on PWM channels of `soc_pwm.ko`, as `/sys/class/leds/red` and `blue`; based on `drivers/leds/leds-pwm.c` |
+| `keyboard_adc_multifunc.ko` | `boards/r1/modules` | R1 | the keys on the ADC resistor ladder, with a second code per key on a double click (`key_config`) |
+| `sa_sound_switch.ko` | `modules/sa_sound_switch` | both | what is plugged into the outputs, read from a pin or an ADC channel, as `/sys/class/switch/headset` and the others; `get_switch_status()` |
+| `sa_earpods_adc.ko` | `modules/sa_earpods_adc` | both | the buttons of a wired headset remote on the ADC: clicks, long presses and volume, as the input device `earpods_adc` |
+| `leds_sgm31324_add.ko` | `boards/r3proii/modules` | R3 Pro II | the SGM31324 RGB LED on I2C and the white LED pin, set up through the `sgm31324` parameter, patterns through `led_pattern` |
 
 `sa_config_module` is one source for every board: `build.sh` passes the board as `HIBY_MODEL`, which is also the model name the vendor module reports.
 
@@ -228,6 +233,11 @@ What differs from the vendor modules, on purpose:
 - **`tcs1421_add`:** `tcs1421_cfg` reads at most 19 characters of the word and refuses a write with no word (`-EINVAL`); the vendor module copies the word onto its stack whatever its length, and with no word applies whatever the stack held.
 - **`keyboard_adc`:** the key table ends after key 8 even when all eight codes are set, and a failed input allocation returns `-ENOMEM` (the vendor module returns 12).
 - **`leds_pwm_add`:** without the device tree path of `leds-pwm.c`, which the module's own device, with its LEDs in parameters, never takes; a period of 0 gives 10 kHz without dividing by 0.
+- **`keyboard_adc_multifunc`, `sa_sound_switch`, `sa_earpods_adc`, `leds_sgm31324_add`:** unloading and failed probes give back what was taken (pins, switch devices, sysfs groups, the regulator, the timer, the pattern memory), and the platform devices have an empty `release`.
+- **`keyboard_adc_multifunc`:** a spinlock in place of the vendor mutex, which its timer takes in interrupt context; the key table ends after key 8.
+- **`sa_sound_switch`:** writing "on" to `enable` while it is on leaves it on; the vendor module turns polling off.
+- **`sa_earpods_adc`:** a missing regulator is left out (the vendor module enables the error pointer); remove does not free the input device twice.
+- **`leds_sgm31324_add`:** `alloc=0` frees the parsed words too; a failed driver registration fails the load.
 
 ## zram on the device
 `rootfs/etc/init.d/S12zram.sh`, which `rcS` runs at boot:
