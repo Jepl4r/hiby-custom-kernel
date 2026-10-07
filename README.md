@@ -13,7 +13,7 @@ On both players the resulting kernel:
 - **uses the board's original device tree**, byte for byte;
 - **adds what the stock kernel lacks:** compressed swap in RAM (zram, LZ4), about 1.1 MB of RAM freed and the deadline I/O scheduler;
 - **can replace the closed Wi-Fi/Bluetooth driver** `cywdhd.ko` with mainline `brcmfmac` and a small open board module, `bcm_wlbt_power` (see [Wi-Fi and Bluetooth](#wi-fi-and-bluetooth-without-cywdhd));
-- **comes with open sources for fifteen of HiBy's closed modules**, drop-in replacements with the same file names, parameters and behaviour: the two sound card drivers and thirteen smaller ones (see [Open HiBy modules](#open-hiby-modules)).
+- **comes with open sources for seventeen of HiBy's closed modules**, drop-in replacements with the same file names, parameters and behaviour: the two sound card drivers, the R3 Pro II's DAC and panel drivers and thirteen smaller ones (see [Open HiBy modules](#open-hiby-modules)).
 
 Working on both players: boot, display and touch, audio (3.5 mm, the R3 Pro II's balanced output, DSD), Wi-Fi, Bluetooth, microSD, USB (ADB, mass storage, USB DAC, OTG), charging and LEDs.
 
@@ -223,6 +223,8 @@ Open sources for closed modules of the stock firmware. Each `.ko` has the vendor
 | `sa_sound_switch.ko` | `modules/sa_sound_switch` | both | what is plugged into the outputs, read from a pin or an ADC channel, as `/sys/class/switch/headset` and the others; `get_switch_status()` |
 | `sa_earpods_adc.ko` | `modules/sa_earpods_adc` | both | the buttons of a wired headset remote on the ADC: clicks, long presses and volume, as the input device `earpods_adc` |
 | `leds_sgm31324_add.ko` | `boards/r3proii/modules` | R3 Pro II | the SGM31324 RGB LED on I2C and the white LED pin, set up through the `sgm31324` parameter, patterns through `led_pattern` |
+| `codec_cs43198_dual.ko` | `boards/r3proii/modules` | R3 Pro II | the two CS43198 DACs as the ASoC codec `cs43198-hifi`: power and reset per stream, the PCM and DSD register sets, volume, filter, NOS and DRE controls; `cs43198_set_dsd_en()` |
+| `lcd_st7701_sbtc033001.ko` | `boards/r3proii/modules` | R3 Pro II | the ST7701S panel: its timings for `soc_fb.ko` and its set-up over a bit-banged 3-wire SPI at every screen-on |
 
 `sa_config_module` is one source for every board: `build.sh` passes the board as `HIBY_MODEL`, which is also the model name the vendor module reports.
 
@@ -238,6 +240,8 @@ What differs from the vendor modules, on purpose:
 - **`sa_sound_switch`:** writing "on" to `enable` while it is on leaves it on; the vendor module turns polling off.
 - **`sa_earpods_adc`:** a missing regulator is left out (the vendor module enables the error pointer); remove does not free the input device twice.
 - **`leds_sgm31324_add`:** `alloc=0` frees the parsed words too; a failed driver registration fails the load.
+- **`codec_cs43198_dual`:** the `write_reg_val` and `reg_val` files refuse a line they cannot parse (`-EINVAL`), where the vendor module writes or reads with whatever its stack held, and `reg_val` reads at most 11 characters of its command; a failed probe or remove gives back the pins and the sysfs group; a failed driver registration fails the load; after remove `cs43198_set_dsd_en()` does nothing; without the vendor module's unexported no-op `codec_*` and `cs43198_platform_*` functions.
+- **`lcd_st7701_sbtc033001`:** a missing vccio regulator also gives back the vcc one.
 
 ## zram on the device
 `rootfs/etc/init.d/S12zram.sh`, which `rcS` runs at boot:
