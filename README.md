@@ -228,7 +228,7 @@ Open sources for closed modules of the stock firmware. Each `.ko` has the vendor
 | `lcd_st7701_sbtc033001.ko` | `boards/r3proii/modules` | R3 Pro II | the ST7701S panel: its timings for `soc_fb.ko` and its set-up over a bit-banged 3-wire SPI at every screen-on |
 | `soc_efuse.ko` | `modules/soc_efuse` | both | the X1600 efuse: `/proc/jz/efuse/efuse_chip_id` and `efuse_user_id`, and `/dev/efuse-string-version` with its ioctls to read and program the segments |
 | `cw2015.ko` | `modules/cw2015` | both | the CW2015 fuel gauge as the power supply `battery`: loads the battery profile from `fuel_gauge`, then capacity, voltage, status and time to empty every second |
-| `codec_cs43131.ko` | `boards/r1/modules` | R1 | the CS43131 DAC as the ASoC codec `cs43131-hifi`: power and reset per stream, the PCM and DSD register sets, volume and `DOP_EN`; `cs43131_set_power()` |
+| `codec_cs43131.ko` | `boards/r1/modules` | R1 | the CS43131 DAC as the ASoC codec `cs43131-hifi`: power and reset per stream, the PCM and DSD register sets, volume, digital filter, `NOS_EN` and `DOP_EN`; `cs43131_set_power()` |
 | `cst8xx_touch.ko` | `boards/r1/modules` | R1 | the Hynitron CST8xx touch panel as the input device `hyn_ts`, one or two contacts (`cst_max_touch_number`), asleep while the screen is off |
 
 `sa_config_module` is one source for every board: `build.sh` passes the board as `HIBY_MODEL`, which is also the model name the vendor module reports.
@@ -249,7 +249,7 @@ What differs from the vendor modules, on purpose:
 - **`lcd_st7701_sbtc033001`:** a missing vccio regulator also gives back the vcc one.
 - **`soc_efuse`:** the ioctls copy from and to user space with `copy_from_user`/`copy_to_user` and check offset and length against the segment; the vendor module uses the user pointers directly. The misc device has an owner, so the module cannot go while it is open; a failed misc registration fails the load, and a failed load gives back the clocks and the pin.
 - **`cw2015`:** a load without the gauge on the bus, or with a `fuel_gauge` of the wrong length, fails (the vendor module loads and does nothing); a failed power supply or workqueue fails the probe, and remove stops the worker and frees what the probe took.
-- **`codec_cs43131`:** as for `codec_cs43198_dual`: `write_reg_val` and `reg_val` refuse a line they cannot parse, failed probes and remove give back the pins and the sysfs group, a failed driver registration fails the load, after remove `cs43131_set_power()` does nothing.
+- **`codec_cs43131`:** as for `codec_cs43198_dual`: `write_reg_val` and `reg_val` refuse a line they cannot parse, failed probes and remove give back the pins and the sysfs group, a failed driver registration fails the load, after remove `cs43131_set_power()` does nothing. `Digital Filter` sets the PCM filter (0..3, as on the CS43198), and `NOS_EN` turns on the CS43131's non-oversampling emulation; the vendor module's `Digital Filter` does nothing and it has no `NOS_EN`.
 - **`cst8xx_touch`:** it never writes firmware to the panel: the vendor module carries a firmware image and flashes it when the panel's version is older or its chip ID cannot be read. Without the vendor module's hex dump of every frame to the kernel log. The number of contacts comes from `cst_max_touch_number`, 1 or 2 (the vendor module reports one; Sonix patched its binary for two). Failed probes and unloading put each regulator once and give back the pins, the interrupt and the workqueue.
 
 ## zram on the device

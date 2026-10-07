@@ -19,7 +19,10 @@
 // Mixer controls (reading any of them returns 0):
 //   Left/Right Playback Volume   0..255, the attenuation register value
 //   DOP_EN           1: the next stream is DSD over PCM
-//   Digital Filter, Mute Output, Soft Mute   accepted, no effect
+//   Digital Filter   PCM filter 0..3: bit 0 phase compensated, bit 1 slow
+//                    roll-off
+//   NOS_EN           1: PCM filter off (non-oversampling emulation)
+//   Mute Output, Soft Mute   accepted, no effect
 //
 // Write-only sysfs files on the I2C device:
 //   write_reg_val    "REG VAL" in hex: write VAL to REG
@@ -54,6 +57,7 @@ extern struct i2c_client *i2c_register_device(struct i2c_board_info *info, int b
 #define CS43131_DSD_VOL_B	0x070000
 #define CS43131_DSD_VOL_A	0x070001
 #define CS43131_DSD_PATH_CTL_2	0x070004
+#define CS43131_PCM_FILTER	0x090000
 #define CS43131_PCM_VOL_B	0x090001
 #define CS43131_PCM_VOL_A	0x090002
 
@@ -114,6 +118,14 @@ static struct cs43131_priv *g_cs43131;
 static int lr_flag;
 static long volume_left = -1;
 static long volume_right = -1;
+
+// PCM filter register: bit 7 slow roll-off, bit 6 phase compensated, bit 5
+// non-oversampling emulation, bit 1 the high-pass filter, as in the
+// register set.
+#define CS43131_FILTER_HPF	0x02
+#define CS43131_FILTER_NOS	0x20
+static int nos_enable;
+static u8 filter_value = CS43131_FILTER_HPF;
 
 // Loaded on every prepare.
 static struct cs43131_reg cs43131_reg[] = {
@@ -234,6 +246,25 @@ static int cs43131_mute_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_v
 
 static int cs43131_digital_filter_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
 {
+	unsigned long v = ucontrol->value.integer.value[0];
+
+	if (v >= 4)
+		v = 0;
+	filter_value = (v << 6) | CS43131_FILTER_HPF;
+	if (!nos_enable)
+		cs43131_write_reg_save(CS43131_PCM_FILTER, filter_value);
+	return 0;
+}
+
+static int cs43131_nos_en_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
+{
+	unsigned long v = ucontrol->value.integer.value[0];
+
+	if (v >= 2)
+		v = 0;
+	nos_enable = v;
+	cs43131_write_reg_save(CS43131_PCM_FILTER,
+			       v ? CS43131_FILTER_NOS | CS43131_FILTER_HPF : filter_value);
 	return 0;
 }
 
@@ -255,6 +286,7 @@ static const struct snd_kcontrol_new cs43131_snd_controls[] = {
 	SOC_SINGLE_EXT("Digital Filter", 0, 0, 4, 0, cs43131_dummy_get, cs43131_digital_filter_put),
 	SOC_SINGLE_EXT("Soft Mute", 0, 0, 1, 0, cs43131_dummy_get, cs43131_soft_mute_put),
 	SOC_SINGLE_EXT("DOP_EN", 0, 0, 1, 0, cs43131_dummy_get, cs43131_dop_en_put),
+	SOC_SINGLE_EXT("NOS_EN", 0, 0, 1, 0, cs43131_dummy_get, cs43131_nos_en_put),
 };
 
 // --- DAI --------------------------------------------------------------------
