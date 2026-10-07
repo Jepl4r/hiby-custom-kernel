@@ -1,1 +1,8 @@
+out/*
+!out/.keep
+boards/*/stock.dtb
+boards/*/stock.kallsyms
+boards/*/vmlinux-stock
+__pycache__/
+*.pyc
 .DS_Store
