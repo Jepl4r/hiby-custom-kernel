@@ -13,7 +13,7 @@ On both players the resulting kernel:
 - **uses the board's original device tree**, byte for byte;
 - **adds what the stock kernel lacks:** compressed swap in RAM (zram, LZ4), about 1.1 MB of RAM freed and the deadline I/O scheduler;
 - **can replace the closed Wi-Fi/Bluetooth driver** `cywdhd.ko` with mainline `brcmfmac` and a small open board module, `bcm_wlbt_power` (see [Wi-Fi and Bluetooth](#wi-fi-and-bluetooth-without-cywdhd));
-- **comes with open sources for seventeen of HiBy's closed modules**, drop-in replacements with the same file names, parameters and behaviour: the two sound card drivers, the R3 Pro II's DAC and panel drivers and thirteen smaller ones (see [Open HiBy modules](#open-hiby-modules)).
+- **comes with open sources for twenty-one of HiBy's closed modules**, drop-in replacements with the same file names, parameters and behaviour: the two sound card drivers, the DACs of both boards, the R3 Pro II's panel, the R1's touch panel, the fuel gauge, the efuse and thirteen smaller ones (see [Open HiBy modules](#open-hiby-modules)).
 
 Working on both players: boot, display and touch, audio (3.5 mm, the R3 Pro II's balanced output, DSD), Wi-Fi, Bluetooth, microSD, USB (ADB, mass storage, USB DAC, OTG), charging and LEDs.
 
@@ -225,6 +225,10 @@ Open sources for closed modules of the stock firmware. Each `.ko` has the vendor
 | `leds_sgm31324_add.ko` | `boards/r3proii/modules` | R3 Pro II | the SGM31324 RGB LED on I2C and the white LED pin, set up through the `sgm31324` parameter, patterns through `led_pattern` |
 | `codec_cs43198_dual.ko` | `boards/r3proii/modules` | R3 Pro II | the two CS43198 DACs as the ASoC codec `cs43198-hifi`: power and reset per stream, the PCM and DSD register sets, volume, filter, NOS and DRE controls; `cs43198_set_dsd_en()` |
 | `lcd_st7701_sbtc033001.ko` | `boards/r3proii/modules` | R3 Pro II | the ST7701S panel: its timings for `soc_fb.ko` and its set-up over a bit-banged 3-wire SPI at every screen-on |
+| `soc_efuse.ko` | `modules/soc_efuse` | both | the X1600 efuse: `/proc/jz/efuse/efuse_chip_id` and `efuse_user_id`, and `/dev/efuse-string-version` with its ioctls to read and program the segments |
+| `cw2015.ko` | `modules/cw2015` | both | the CW2015 fuel gauge as the power supply `battery`: loads the battery profile from `fuel_gauge`, then capacity, voltage, status and time to empty every second |
+| `codec_cs43131.ko` | `boards/r1/modules` | R1 | the CS43131 DAC as the ASoC codec `cs43131-hifi`: power and reset per stream, the PCM and DSD register sets, volume and `DOP_EN`; `cs43131_set_power()` |
+| `cst8xx_touch.ko` | `boards/r1/modules` | R1 | the Hynitron CST8xx touch panel as the input device `hyn_ts`, one or two contacts (`cst_max_touch_number`), asleep while the screen is off |
 
 `sa_config_module` is one source for every board: `build.sh` passes the board as `HIBY_MODEL`, which is also the model name the vendor module reports.
 
@@ -242,6 +246,10 @@ What differs from the vendor modules, on purpose:
 - **`leds_sgm31324_add`:** `alloc=0` frees the parsed words too; a failed driver registration fails the load.
 - **`codec_cs43198_dual`:** the `write_reg_val` and `reg_val` files refuse a line they cannot parse (`-EINVAL`), where the vendor module writes or reads with whatever its stack held, and `reg_val` reads at most 11 characters of its command; a failed probe or remove gives back the pins and the sysfs group; a failed driver registration fails the load; after remove `cs43198_set_dsd_en()` does nothing; without the vendor module's unexported no-op `codec_*` and `cs43198_platform_*` functions.
 - **`lcd_st7701_sbtc033001`:** a missing vccio regulator also gives back the vcc one.
+- **`soc_efuse`:** the ioctls copy from and to user space with `copy_from_user`/`copy_to_user` and check offset and length against the segment; the vendor module uses the user pointers directly. The misc device has an owner, so the module cannot go while it is open; a failed misc registration fails the load, and a failed load gives back the clocks and the pin.
+- **`cw2015`:** a load without the gauge on the bus, or with a `fuel_gauge` of the wrong length, fails (the vendor module loads and does nothing); a failed power supply or workqueue fails the probe, and remove stops the worker and frees what the probe took.
+- **`codec_cs43131`:** as for `codec_cs43198_dual`: `write_reg_val` and `reg_val` refuse a line they cannot parse, failed probes and remove give back the pins and the sysfs group, a failed driver registration fails the load, after remove `cs43131_set_power()` does nothing.
+- **`cst8xx_touch`:** it never writes firmware to the panel: the vendor module carries a firmware image and flashes it when the panel's version is older or its chip ID cannot be read. Without the vendor module's hex dump of every frame to the kernel log. The number of contacts comes from `cst_max_touch_number`, 1 or 2 (the vendor module reports one; Sonix patched its binary for two). Failed probes and unloading put each regulator once and give back the pins, the interrupt and the workqueue.
 
 ## zram on the device
 `rootfs/etc/init.d/S12zram.sh`, which `rcS` runs at boot:
