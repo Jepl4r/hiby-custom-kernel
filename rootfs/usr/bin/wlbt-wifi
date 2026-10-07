@@ -2,10 +2,10 @@
 #
 # wlbt-wifi up|down -- Wi-Fi with bcm_wlbt_power and brcmfmac.
 #
-#   up    powers the chip, points the firmware loader at the stock AP6212A
-#         blob, loads brcmfmac and waits for the interface; then gives it the
-#         stock MAC address through S43wifi_bcm_init_config, when that script
-#         is there
+#   up    powers the chip, points the firmware loader at the stock blob for
+#         the module maker, loads brcmfmac and waits for the interface; then
+#         gives it the stock MAC address through S43wifi_bcm_init_config, when
+#         that script is there
 #   down  takes the interface down, unloads brcmfmac and powers the chip down
 #
 # Exits 0 without doing anything where bcm_wlbt_power is not loaded, so the
@@ -34,11 +34,17 @@ wifi_down() {
 wifi_up() {
 	echo 1 > $RADIO/wifi_power || return 1
 
-	# brcmfmac asks for brcm/brcmfmac43430-sdio.* in the firmware search
-	# path, which FWDIR is put in front of.
+	# The blob goes with the module maker, as the stock cywdhd chooses it:
+	# AzureWave AW-NB372SM (chipvendor 0x81) or AP6212A. brcmfmac asks for
+	# brcm/brcmfmac43430-sdio.* in the firmware search path, which FWDIR is
+	# put in front of.
+	case "$(cat $RADIO/chipvendor)" in
+	0x81) fw=cyw43438-7.46.58.35.bin; nv=nvram_azw372.txt ;;
+	*)    fw=fw_bcm43438a1.bin;       nv=nvram_ap6212a.txt ;;
+	esac
 	mkdir -p $FWDIR/brcm
-	ln -sf $FWSRC/fw_bcm43438a1.bin $FWDIR/brcm/brcmfmac43430-sdio.bin
-	ln -sf $FWSRC/nvram_ap6212a.txt $FWDIR/brcm/brcmfmac43430-sdio.txt
+	ln -sf $FWSRC/$fw $FWDIR/brcm/brcmfmac43430-sdio.bin
+	ln -sf $FWSRC/$nv $FWDIR/brcm/brcmfmac43430-sdio.txt
 	echo -n $FWDIR > /sys/module/firmware_class/parameters/path
 
 	[ -d /sys/module/brcmutil ] || insmod $MODDIR/brcmutil.ko || return 1

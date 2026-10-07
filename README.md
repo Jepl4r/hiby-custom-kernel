@@ -13,7 +13,7 @@ On both players the resulting kernel:
 - **uses the board's original device tree**, byte for byte;
 - **adds what the stock kernel lacks:** compressed swap in RAM (zram, LZ4), about 1.1 MB of RAM freed and the deadline I/O scheduler;
 - **can replace the closed Wi-Fi/Bluetooth driver** `cywdhd.ko` with mainline `brcmfmac` and a small open board module, `bcm_wlbt_power` (see [Wi-Fi and Bluetooth](#wi-fi-and-bluetooth-without-cywdhd));
-- **comes with open sources for eight of HiBy's closed modules**, drop-in replacements with the same file names, parameters and behaviour: the two sound card drivers and six small ones (see [Open HiBy modules](#open-hiby-modules)).
+- **comes with open sources for eleven of HiBy's closed modules**, drop-in replacements with the same file names, parameters and behaviour: the two sound card drivers and nine small ones (see [Open HiBy modules](#open-hiby-modules)).
 
 Working on both players: boot, display and touch, audio (3.5 mm, the R3 Pro II's balanced output, DSD), Wi-Fi, Bluetooth, microSD, USB (ADB, mass storage, USB DAC, OTG), charging and LEDs.
 
@@ -26,7 +26,7 @@ The method, the Docker environment and three patches (0001, 0002, 0013) come fro
 - **Anything from HiBy's firmware:** the stock device trees, their symbol tables, the closed modules, the firmware blobs and the stock scripts. `tools/extract-stock.py` takes what the build needs out of the official firmware.
 
 ## Requirements
-- Docker.
+- Docker. On Apple Silicon Macs: Docker Desktop with "Use Rosetta for x86_64/amd64 emulation" enabled.
 - The SDK tarball.
 - The stock firmware of the player (its `.upt`), or just its stock kernel image.
 - Python 3 and `7z` (macOS: `brew install p7zip`). Optional: `pip install vmlinux-to-elf`, for the full symbol comparison.
@@ -97,7 +97,7 @@ What the build makes, and where it goes in the stock firmware:
 
 | from | to |
 |---|---|
-| `out/xImage-MODEL` | the kernel image of the `.upt` |
+| `out/xImage-MODEL` | the kernel image of the `.upt`, in place of the stock one; not larger than it, which is all the room the kernel partition is known to have |
 | `out/modules-MODEL/*.ko` | `/module_driver` |
 | `rootfs/` and `boards/MODEL/rootfs/` | the root of the rootfs; scripts executable |
 
@@ -162,7 +162,7 @@ The fragments of the two boards differ only where their stock kernels do: the R1
 - `configs/r1-*.config`: the same four for the R1, without Type-C and compaction in `r1-parity.config`.
 
 ## Wi-Fi and Bluetooth without cywdhd
-Both players have a BCM43430 combo, an AP6212A module: Wi-Fi on SDIO, Bluetooth on `/dev/ttyS0`. HiBy drives both through the closed `cywdhd.ko`, about 860 KB of code loaded at every boot. In its place:
+Both players have a BCM43430 combo, either an AP6212A or an AzureWave AW-NB372SM module depending on the unit: Wi-Fi on SDIO, Bluetooth on `/dev/ttyS0`. HiBy drives both through the closed `cywdhd.ko`, about 860 KB of code loaded at every boot. In its place:
 
 - **`brcmfmac.ko` + `brcmutil.ko`** (mainline, about 165 KB), loaded only while Wi-Fi is on.
 - **`bcm_wlbt_power.ko`** (`modules/bcm_wlbt_power`), the board side of `cywdhd` and nothing else:
@@ -174,7 +174,7 @@ Both players have a BCM43430 combo, an AP6212A module: Wi-Fi on SDIO, Bluetooth 
   - R3 Pro II: `wl_reg_on=PF02 wl_host_wake=PC25 wl_mmc=0 bt_reg_on=PF03 host_wake_bt=PF05`;
   - R1: `wl_reg_on=PB03 wl_host_wake=PA08 wl_mmc=0 bt_reg_on=PB04 host_wake_bt=PB05`.
 - **`rootfs/usr/bin/wlbt-wifi up|down`:**
-  - **up:** powers the chip, links the stock blob (`fw_bcm43438a1.bin` + `nvram_ap6212a.txt` in `/lib/firmware/wifi_bcm/`) under the name `brcmfmac` asks for, loads the driver, waits for `wlan0` and gives it the stock MAC address.
+  - **up:** powers the chip, links the stock blob for the module in `/lib/firmware/wifi_bcm/` (`cyw43438-7.46.58.35.bin` + `nvram_azw372.txt` when `chipvendor` is `0x81`, AzureWave; `fw_bcm43438a1.bin` + `nvram_ap6212a.txt` otherwise, AP6212A) under the name `brcmfmac` asks for, loads the driver, waits for `wlan0` and gives it the stock MAC address.
   - **down:** unloads the driver and powers the chip down.
 
 Four changes to the stock scripts hand Wi-Fi over to it (the three scripts in `usr/bin` and `etc/init.d` are the same on both players):
@@ -215,12 +215,19 @@ Open sources for closed modules of the stock firmware. Each `.ko` has the vendor
 | `fusb302b_add.ko` | `boards/r3proii/modules` | R3 Pro II | registers the FUSB302B Type-C controller with its board data for the driver of patch 0004 |
 | `gpio_aw95016_add.ko` | `boards/r3proii/modules` | R3 Pro II | registers the AW95016 GPIO expander for the driver of patch 0010 |
 | `sau.ko` | `boards/r3proii/modules` | R3 Pro II | `/sys/devices/platform/sa_information/sa_verification`, read by HiBy's player and bluealsa |
+| `keyboard_adc.ko` | `boards/r3proii/modules` | R3 Pro II | the keys on the ADC resistor ladder (`soc_adc.ko`), as the input device `jz adc keyboard` |
+| `tcs1421_add.ko` | `boards/r1/modules` | R1 | the TCS1421 Type-C port controller, its role (`Sink`, `Source`, `StrongDRP`, `NormalDRP`) set on two pins through `/sys/devices/platform/tcs1421/tcs1421_cfg` |
+| `leds_pwm_add.ko` | `boards/r1/modules` | R1 | the red and blue LEDs on PWM channels of `soc_pwm.ko`, as `/sys/class/leds/red` and `blue`; based on `drivers/leds/leds-pwm.c` |
 
 `sa_config_module` is one source for every board: `build.sh` passes the board as `HIBY_MODEL`, which is also the model name the vendor module reports.
 
 What differs from the vendor modules, on purpose:
 - **`soc_utils`:** a disable with the count already at 0 is ignored; the vendor module takes the count below 0, and the next enable then leaves the clock off. It can also be unloaded.
 - **`gpio_aw95016_add`, `sau`, `sa_config_module`:** unloading frees what loading took (the RSTN GPIO, the sysfs group and the device, an empty `release` for the platform devices). The vendor `sau.ko` does not unregister anything when unloaded.
+- **`tcs1421_add`, `leds_pwm_add`, `keyboard_adc`:** a probe that fails, and unloading, give back what was taken (the CFG pins, the sysfs file, the PWM channels, the driver data), and the platform devices have an empty `release`.
+- **`tcs1421_add`:** `tcs1421_cfg` reads at most 19 characters of the word and refuses a write with no word (`-EINVAL`); the vendor module copies the word onto its stack whatever its length, and with no word applies whatever the stack held.
+- **`keyboard_adc`:** the key table ends after key 8 even when all eight codes are set, and a failed input allocation returns `-ENOMEM` (the vendor module returns 12).
+- **`leds_pwm_add`:** without the device tree path of `leds-pwm.c`, which the module's own device, with its LEDs in parameters, never takes; a period of 0 gives 10 kHz without dividing by 0.
 
 ## zram on the device
 `rootfs/etc/init.d/S12zram.sh`, which `rcS` runs at boot:
