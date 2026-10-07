@@ -503,12 +503,12 @@ static const struct snd_soc_dai_ops cs43198_dai_drv_ops = {
 	.trigger = cs43198_dai_trigger,
 };
 
-// Bit 16 is set as in the vendor driver; it names no rate in this kernel.
+// 705600 Hz is DSD256 over DoP.
 #define CS43198_RATES	(SNDRV_PCM_RATE_8000 | SNDRV_PCM_RATE_16000 | SNDRV_PCM_RATE_32000 | \
 			 SNDRV_PCM_RATE_44100 | SNDRV_PCM_RATE_48000 | SNDRV_PCM_RATE_88200 | \
 			 SNDRV_PCM_RATE_96000 | SNDRV_PCM_RATE_176400 | SNDRV_PCM_RATE_192000 | \
-			 SNDRV_PCM_RATE_352800 | SNDRV_PCM_RATE_384000 | SNDRV_PCM_RATE_768000 | \
-			 (1 << 16))
+			 SNDRV_PCM_RATE_352800 | SNDRV_PCM_RATE_384000 | SNDRV_PCM_RATE_705600 | \
+			 SNDRV_PCM_RATE_768000)
 
 static struct snd_soc_dai_driver cs43198_dai_drv = {
 	.name = "cs43198-hifi",
