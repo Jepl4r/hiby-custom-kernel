@@ -60,6 +60,9 @@ extern void aic_slave_trigger(void (*start)(void *data),
 #define HBC3000_RATE_DOP	2
 #define DOP_MIN_RATE		176400
 
+// How long the outputs stay muted after the CS43198 is powered up.
+#define DAC_SETTLE_MS		50
+
 // Clock id of the I2S controller's set_sysclk (soc_aic.ko): MCLK output off.
 #define AIC_SYSCLK_MCLK_OFF	3
 
@@ -153,26 +156,19 @@ static int codec_board_ot_get(struct snd_kcontrol *kcontrol,
 //   4     S/PDIF: the HBC3000 on, the DAC off, the analog stages muted
 //   other everything off
 // A write of the current route returns at once, apart from route 3 above.
+//
+// The analog stages stay muted while the HBC3000 is powered and loaded, the
+// DAC powered up and the output switches set, and DAC_SETTLE_MS after.
 static int codec_board_ot_put(struct snd_kcontrol *kcontrol,
 			      struct snd_ctl_elem_value *ucontrol)
 {
 	int val = ucontrol->value.integer.value[0];
+	bool change = val != codec_board_ot;
 
 	if ((val == ROUTE_LINEOUT && codec_board_ot == ROUTE_HP) ||
 	    (val == ROUTE_HP && codec_board_ot == ROUTE_LINEOUT))
 		return 0;
-
-	if (val == ROUTE_BALANCED) {
-		analog_mute(1);
-		mdelay(5);
-		if (balance_lineout_en)
-			SET_GPOS(gpo_balanced_lineout);
-		else
-			SET_GPOS(gpo_balanced_hp);
-		analog_mute(0);
-	}
-
-	if (val == codec_board_ot)
+	if (!change && val != ROUTE_BALANCED)
 		return 0;
 
 	switch (val) {
@@ -184,13 +180,28 @@ static int codec_board_ot_put(struct snd_kcontrol *kcontrol,
 		hbc3000_enable();
 		dac_power_up();
 		SET_GPOS(gpo_single_ended);
+		msleep(DAC_SETTLE_MS);
 		analog_mute(0);
 		break;
 	case ROUTE_BALANCED:
-		hbc3000_set_spdif_mode(0);
-		hbc3000_enable();
-		dac_power_up();
-		SET_GPOS(gpo_balanced_dac);
+		analog_mute(1);
+		mdelay(5);
+		if (change) {
+			hbc3000_set_spdif_mode(0);
+			hbc3000_enable();
+			dac_power_up();
+		}
+		if (balance_lineout_en)
+			SET_GPOS(gpo_balanced_lineout);
+		else
+			SET_GPOS(gpo_balanced_hp);
+		if (change) {
+			SET_GPOS(gpo_balanced_dac);
+			msleep(DAC_SETTLE_MS);
+		}
+		analog_mute(0);
+		if (!change)
+			return 0;
 		break;
 	case ROUTE_SPDIF:
 		hbc3000_set_spdif_mode(1);
@@ -337,6 +348,20 @@ static struct snd_soc_dai_link codec_board_dais[] = {
 	},
 };
 
+// In a suspend the HBC3000 loses its power after this card, the output
+// switches with it. The analog stages are muted and the DAC powered down
+// first; the route is forgotten, so the next write of one powers everything
+// back and unmutes at the end.
+static int codec_board_suspend_pre(struct snd_soc_card *card)
+{
+	cancel_delayed_work_sync(&snd_card_delay_work);
+	analog_mute(1);
+	mdelay(5);
+	gpio_set_value(GPIO_DAC_PWR_EN, 0);
+	codec_board_ot = 0;
+	return 0;
+}
+
 static struct snd_soc_card codec_snd_card = {
 	.name = "hiby-sound-card",
 	.owner = THIS_MODULE,
@@ -344,6 +369,7 @@ static struct snd_soc_card codec_snd_card = {
 	.num_links = ARRAY_SIZE(codec_board_dais),
 	.controls = codec_board_controls,
 	.num_controls = ARRAY_SIZE(codec_board_controls),
+	.suspend_pre = codec_board_suspend_pre,
 };
 
 // Powers down an HBC3000 crystal 1 s after playback starts; aic_trigger_stop

@@ -198,7 +198,7 @@ To go back to `cywdhd`, leave the four changes and the three modules out.
 ## The sound card
 `boards/MODEL/modules/x1600_hiby_MODEL_sound_card/` holds an open source for the board's ASoC machine driver, the module that ties the X1600 I2S controller (`soc_aic.ko`) to the DAC. Its `.ko` has the vendor module's file name and replaces it in `/module_driver`; the stock `x1600_hiby_MODEL_sound_card.sh` loads it unchanged.
 
-It keeps everything the player sees: the platform device `hiby-hifi-board.0`, the card `hiby-sound-card`, the DAI links and the mixer controls, with the same names, ranges and behaviour. The two modules were checked against the vendor ones by running both, function by function, in an emulator with every external call recorded: every route, sample rate, DoP setting and error path gives the same calls with the same arguments, in the same order.
+It keeps everything the player sees: the platform device `hiby-hifi-board.0`, the card `hiby-sound-card`, the DAI links and the mixer controls, with the same names, ranges and behaviour. The two modules were checked against the vendor ones by running both, function by function, in an emulator with every external call recorded: every sample rate, DoP setting and error path gives the same calls with the same arguments, in the same order, and so does every route on the R1.
 
 | board | DAC | links | controls |
 |---|---|---|---|
@@ -208,6 +208,11 @@ It keeps everything the player sees: the platform device `hiby-hifi-board.0`, th
 `Output Port Switch` on the R3 Pro II: 1 and 2 the 3.5 mm jack (line out, headphones), 3 the 4.4 mm jack (headphones, or line out with `Balance Lineout En`), 4 S/PDIF, anything else off. Two vendor behaviours are kept on purpose, since players work around them: moving between 1 and 2 does nothing, and writing the current route does nothing except for 3, which applies `Balance Lineout En` again.
 
 The only differences: on the R3 Pro II the workqueue is created before the GPIOs are requested, a failed allocation fails the probe, and removing the driver frees what the probe took (GPIOs, workqueue, the `soc_aic` callbacks), so the module can be unloaded and loaded again.
+
+On the R3 Pro II, besides, a change of route stays silent:
+
+- The vendor driver, moving to 3, mutes, sets the 4.4 mm switches and unmutes, and only then powers and loads the HBC3000 and power-cycles the DAC, with the outputs open: a pop on the 4.4 mm jack at every change to it and after every wake-up. Here the outputs stay muted through the whole sequence (HBC3000, DAC, switches) for all of 1, 2 and 3, and 50 ms more while the DAC settles. A write of 3 over 3 is the vendor's.
+- In a suspend the HBC3000 loses its power, and the output switches with it, after the card is suspended. The card's `suspend_pre` mutes the outputs and powers the DAC down first, and forgets the route (`Output Port Switch` reads 0), so the next write of a route powers everything back as above.
 
 ## Open HiBy modules
 Open sources for closed modules of the stock firmware. Each `.ko` has the vendor module's file name and replaces it in `/module_driver`; the stock `.sh` that loads it stays as it is. They were checked like the sound card drivers: the vendor module and the rebuilt one run side by side in an emulator, every call into the kernel and the other HiBy modules recorded and compared, and their parameters (names, types, defaults, permissions) and tables (devices, drivers, file operations, sysfs attributes) compared too.
