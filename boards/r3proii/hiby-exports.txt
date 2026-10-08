@@ -1,11 +1,10 @@
 # Symbols the HiBy modules loaded before ours export, which a module built
 # here may use: soc_pwm.ko (pwm2_*), soc_adc.ko (adc_*), soc_fb.ko
 # (jzfb_register_lcd), soc_msc.ko, soc_utils.ko, and for the sound card
-# soc_aic.ko, sa_sound_hbc3000.ko and codec_cs43198_dual.ko.
+# sa_sound_hbc3000.ko and codec_cs43198_dual.ko.
 jzmmc_manual_detect
 ingenic_rtc32k_disable
 ingenic_rtc32k_enable
-aic_slave_trigger
 cs43198_set_dsd_en
 hbc3000_disable
 hbc3000_enable

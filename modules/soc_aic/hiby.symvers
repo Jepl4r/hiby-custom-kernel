@@ -1,0 +1,4 @@
+0x00000000	gpio_set_func	utils	EXPORT_SYMBOL
+0x00000000	gpio_to_str	utils	EXPORT_SYMBOL
+0x00000000	local_clock_us	utils	EXPORT_SYMBOL
+0x00000000	__assert	utils	EXPORT_SYMBOL
