@@ -13,7 +13,7 @@ On both players the resulting kernel:
 - **uses the board's original device tree**, byte for byte;
 - **adds what the stock kernel lacks:** compressed swap in RAM (zram, LZ4), about 1.1 MB of RAM freed and the deadline I/O scheduler;
 - **can replace the closed Wi-Fi/Bluetooth driver** `cywdhd.ko` with mainline `brcmfmac` and a small open board module, `bcm_wlbt_power` (see [Wi-Fi and Bluetooth](#wi-fi-and-bluetooth-without-cywdhd));
-- **comes with open sources for twenty-six of HiBy's closed modules**, drop-in replacements with the same file names, parameters and behaviour: the two sound card drivers, the DACs of both boards, the panels of both boards, the R1's touch panel, the fuel gauge, the efuse, the ADC, the DAC's I2C bus, the GPIO keys, the reserved-memory manager and thirteen smaller ones (see [Open HiBy modules](#open-hiby-modules)).
+- **comes with open sources for twenty-seven of HiBy's closed modules**, drop-in replacements with the same file names, parameters and behaviour: the two sound card drivers, the DACs of both boards, the R3 Pro II's HBC3000 FPGA, the panels of both boards, the R1's touch panel, the fuel gauge, the efuse, the ADC, the DAC's I2C bus, the GPIO keys, the reserved-memory manager and thirteen smaller ones (see [Open HiBy modules](#open-hiby-modules)).
 
 Working on both players: boot, display and touch, audio (3.5 mm, the R3 Pro II's balanced output, DSD), Wi-Fi, Bluetooth, microSD, USB (ADB, mass storage, USB DAC, OTG), charging and LEDs.
 
@@ -23,7 +23,7 @@ The method, the Docker environment and three patches (0001, 0002, 0013) come fro
 
 ## Not in this repository
 - **Ingenic's SDK** (`ingenic-linux-kernel4.4.94-x1600-v6.0-20240606.tar.bz2`, kernel sources and toolchain). It is not redistributable and has to be obtained separately.
-- **Anything from HiBy's firmware:** the stock device trees, their symbol tables, the closed modules, the firmware blobs and the stock scripts. `tools/extract-stock.py` takes what the build needs out of the official firmware.
+- **Anything from HiBy's firmware:** the stock device trees, their symbol tables, the closed modules, the firmware blobs (the HBC3000's FPGA configuration among them) and the stock scripts. `tools/extract-stock.py` takes what the build needs out of the official firmware, `tools/hbc3000-firmware.py` the FPGA configuration out of the stock `sa_sound_hbc3000.ko`.
 
 ## Requirements
 - Docker. On Apple Silicon Macs: Docker Desktop with "Use Rosetta for x86_64/amd64 emulation" enabled.
@@ -55,6 +55,7 @@ The method, the Docker environment and three patches (0001, 0002, 0013) come fro
     rootfs/                     files for the root filesystem of every player
     tools/extract-stock.py      device tree and symbols from the stock firmware
     tools/compare.py            comparison with the stock kernel
+    tools/hbc3000-firmware.py   the HBC3000's configuration from the stock module
     out/                        xImage, modules, System.map, config, log and report
 ```
 
@@ -237,6 +238,7 @@ Open sources for closed modules of the stock firmware. Each `.ko` has the vendor
 | `keyboard_gpio_add.ko` | `modules/keyboard_gpio_add` | both | the keys on pins (power, next or previous track) as the input device `md-gpio-keys`, set up through the `keyboard` parameter; based on `drivers/input/keyboard/gpio_keys.c` |
 | `i2c_gpio_add.ko` | `modules/i2c_gpio_add` | both | bit-banged I2C buses added through the `i2c_bus` parameter (bus 3, the DAC's); `i2c-gpio.c` and `i2c-algo-bit.c` in one module, the algorithm as `md_i2c_bit_add_numbered_bus()` |
 | `lcd_lg35583.ko` | `boards/r1/modules` | R1 | the R1's 480x800 panel for `soc_fb.ko`: an LG35583 (16-bit SPI words) or an ST7701S (9-bit), told apart by ADC channel 3, set up at every screen-on; `/proc/lcd_reg` sets the LG35583's register C700 |
+| `sa_sound_hbc3000.ko` | `boards/r3proii/modules` | R3 Pro II | the HBC3000, a Gowin GW1N FPGA between the I2S controller and the DACs: it is loaded over JTAG with HiBy's configuration (see below), then makes the audio clocks, is the I2S master, unpacks DoP and drives the output switches on its GPO pins, set through a 12-bit SPI; `hbc3000_enable()`, `hbc3000_set_samplerate()` and the rest for the sound card |
 
 `sa_config_module` is one source for every board: `build.sh` passes the board as `HIBY_MODEL`, which is also the model name the vendor module reports.
 
@@ -263,6 +265,17 @@ What differs from the vendor modules, on purpose:
 - **`keyboard_gpio_add`:** reading `keyboard` before `register` lists the keys written so far (the vendor module reads them through a pointer that is still NULL); a line refused frees its `tag`, `alloc=0` frees the parsed words, a failed registration gives the keys back and lists none. Unloading takes away the device registered through the parameter and the keys not registered.
 - **`i2c_gpio_add`:** a bus without `sda=` is refused (the vendor module registers it and the probe then fails); a failed registration also puts the device.
 - **`lcd_lg35583`:** as for `lcd_st7701_sbtc033001`, a missing vccio regulator also gives back the vcc one. `/proc/lcd_reg` reads at most 127 characters, terminates them and ignores a line without two numbers (the vendor module copies the whole write into a 128-byte stack buffer and parses it unterminated). Unloading removes `/proc/lcd_reg`; the vendor module leaves it pointing at freed code.
+- **`sa_sound_hbc3000`:** the FPGA configuration is not compiled in: it is loaded with `request_firmware()` from `/lib/firmware/hbc3000.fw`, and the user code that tells a loaded FPGA is read from it. Without the file the probe fails and the exported functions return `-ENODEV` (the vendor module's would dereference a NULL device). A pin that cannot be requested is skipped without freeing it (the vendor module frees it, which releases another driver's pin); remove powers the FPGA off and gives back its pins, and unloading unregisters the driver and the device (the vendor module's exit only prints). Left out, as unreachable: the vendor module's delayed reload after a resume (its switch is never set), the regulator supply (no parameter sets one), and its unexported loader and SPI helpers that nothing calls.
+
+### The HBC3000's configuration
+The open `sa_sound_hbc3000.ko` needs the FPGA configuration HiBy compiled into the vendor module, its 34304-byte `FS_data` array. It is not in this repository; take it out of the stock module and put it in the root filesystem:
+
+```
+python3 tools/hbc3000-firmware.py <rootfs>/module_driver/sa_sound_hbc3000.ko hbc3000.fw
+cp hbc3000.fw <rootfs>/lib/firmware/hbc3000.fw
+```
+
+Without it the module does not load and the R3 Pro II has no sound.
 
 ## zram on the device
 `rootfs/etc/init.d/S12zram.sh`, which `rcS` runs at boot:
