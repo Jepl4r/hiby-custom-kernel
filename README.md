@@ -13,7 +13,7 @@ On both players the resulting kernel:
 - **uses the board's original device tree**, byte for byte;
 - **adds what the stock kernel lacks:** compressed swap in RAM (zram, LZ4), about 1.1 MB of RAM freed and the deadline I/O scheduler;
 - **can replace the closed Wi-Fi/Bluetooth driver** `cywdhd.ko` with mainline `brcmfmac` and a small open board module, `bcm_wlbt_power` (see [Wi-Fi and Bluetooth](#wi-fi-and-bluetooth-without-cywdhd));
-- **comes with open sources for twenty-seven of HiBy's closed modules**, drop-in replacements with the same file names, parameters and behaviour: the two sound card drivers, the DACs of both boards, the R3 Pro II's HBC3000 FPGA, the panels of both boards, the R1's touch panel, the fuel gauge, the efuse, the ADC, the DAC's I2C bus, the GPIO keys, the reserved-memory manager and thirteen smaller ones (see [Open HiBy modules](#open-hiby-modules)).
+- **comes with open sources for thirty of HiBy's closed modules**, drop-in replacements with the same file names, parameters and behaviour: the two sound card drivers, the DACs of both boards, the R3 Pro II's HBC3000 FPGA, the panels of both boards, the R1's touch panel, the fuel gauge, the efuse, the ADC, the DAC's I2C bus, the GPIO keys, the reserved-memory manager, the helpers the other modules link against and fifteen smaller ones (see [Open HiBy modules](#open-hiby-modules)).
 
 Working on both players: boot, display and touch, audio (3.5 mm, the R3 Pro II's balanced output, DSD), Wi-Fi, Bluetooth, microSD, USB (ADB, mass storage, USB DAC, OTG), charging and LEDs.
 
@@ -51,7 +51,8 @@ The method, the Docker environment and three patches (0001, 0002, 0013) come fro
       soc_utils/, pwm_backlight/, sa_config_module/,
       sa_sound_switch/, sa_earpods_adc/, soc_efuse/,
       cw2015/, soc_adc/, rmem_manager/,
-      keyboard_gpio_add/, i2c_gpio_add/               open HiBy modules
+      keyboard_gpio_add/, i2c_gpio_add/, utils/,
+      soc_gpio/, sa_hgl_dma/                          open HiBy modules
     rootfs/                     files for the root filesystem of every player
     tools/extract-stock.py      device tree and symbols from the stock firmware
     tools/compare.py            comparison with the stock kernel
@@ -244,6 +245,9 @@ Open sources for closed modules of the stock firmware. Each `.ko` has the vendor
 | `i2c_gpio_add.ko` | `modules/i2c_gpio_add` | both | bit-banged I2C buses added through the `i2c_bus` parameter (bus 3, the DAC's); `i2c-gpio.c` and `i2c-algo-bit.c` in one module, the algorithm as `md_i2c_bit_add_numbered_bus()` |
 | `lcd_lg35583.ko` | `boards/r1/modules` | R1 | the R1's 480x800 panel for `soc_fb.ko`: an LG35583 (16-bit SPI words) or an ST7701S (9-bit), told apart by ADC channel 3, set up at every screen-on; `/proc/lcd_reg` sets the LG35583's register C700 |
 | `sa_sound_hbc3000.ko` | `boards/r3proii/modules` | R3 Pro II | the HBC3000, a Gowin GW1N FPGA between the I2S controller and the DACs: it is loaded over JTAG with HiBy's configuration (see below), then makes the audio clocks, is the I2S master, unpacks DoP and drives the output switches on its GPO pins, set through a 12-bit SPI; `hbc3000_enable()`, `hbc3000_set_samplerate()` and the rest for the sound card |
+| `utils.ko` | `modules/utils` | both | the helpers the other HiBy modules link against: pin names (`str_to_gpio()`, `gpio_to_str()`, the `param_gpio_ops` parameter type), `gpio_set_func()`, word splitting (`str_to_words()`), `i2c_register_device()`, `spi_register_device()`, `local_clock_us/ms()`, the `param_pmu_ops` parameter type of the PMU drivers, and `/dev/log_manager`, a ring of timestamped records |
+| `soc_gpio.ko` | `modules/soc_gpio` | both | `/dev/gpio`: the function, pull and level of a pin, by name, through ioctls |
+| `sa_hgl_dma.ko` | `modules/sa_hgl_dma` | both | `/dev/sa_hgl_dma`: a block from `rmem_manager.ko` that a program maps, and 2D copies out of it by the DMA controller, one per write |
 
 `sa_config_module` is one source for every board: `build.sh` passes the board as `HIBY_MODEL`, which is also the model name the vendor module reports.
 
@@ -271,6 +275,9 @@ What differs from the vendor modules, on purpose:
 - **`i2c_gpio_add`:** a bus without `sda=` is refused (the vendor module registers it and the probe then fails); a failed registration also puts the device.
 - **`lcd_lg35583`:** as for `lcd_st7701_sbtc033001`, a missing vccio regulator also gives back the vcc one. `/proc/lcd_reg` reads at most 127 characters, terminates them and ignores a line without two numbers (the vendor module copies the whole write into a 128-byte stack buffer and parses it unterminated). Unloading removes `/proc/lcd_reg`; the vendor module leaves it pointing at freed code.
 - **`sa_sound_hbc3000`:** the FPGA configuration is not compiled in: it is loaded with `request_firmware()` from `/lib/firmware/hbc3000.fw`, and the user code that tells a loaded FPGA is read from it. Without the file the probe fails and the exported functions return `-ENODEV` (the vendor module's would dereference a NULL device). A pin that cannot be requested is skipped without freeing it (the vendor module frees it, which releases another driver's pin); remove powers the FPGA off and gives back its pins, and unloading unregisters the driver and the device (the vendor module's exit only prints). Left out, as unreachable: the vendor module's delayed reload after a resume (its switch is never set), the regulator supply (no parameter sets one), and its unexported loader and SPI helpers that nothing calls.
+- **`utils`:** `/dev/log_manager` copies from and to user space with `copy_from_user`/`copy_to_user` (the vendor module uses the user pointers directly), reads at most 1024 bytes of a record and returns the bytes it delivered, at most the count asked for (the vendor module returns the record's length); a failed allocation at open returns `-ENOMEM` (the vendor module hits `BUG()` or dereferences NULL), the misc device has an owner, and unloading frees the ring. `gpio_port_set_func()` stops at pin 31: the vendor loop shifts the mask by the pin number modulo 32 and never ends when pin 31 is set. `spi_register_device()` drops the references it takes on the devices it finds and on the master. A failed misc or driver registration fails the load (the vendor module hits `BUG()` or carries on). Left out: two unexported string-to-number helpers nothing calls.
+- **`soc_gpio`:** the ioctls copy their arguments and pin and function names from user space and their results to it (the vendor module uses the user pointers directly); names are read up to 31 characters. The misc device has an owner, and a failed registration fails the load (the vendor module panics).
+- **`sa_hgl_dma`:** `mmap` checks offset and length against the block it allocated, without overflow; the vendor module checks them against the parameter, which can change after the open, and an offset near 4 GB wraps past its check and maps memory outside the block.
 
 ### The HBC3000's configuration
 The open `sa_sound_hbc3000.ko` needs the FPGA configuration HiBy compiled into the vendor module, its 34304-byte `FS_data` array. It is not in this repository; take it out of the stock module and put it in the root filesystem:

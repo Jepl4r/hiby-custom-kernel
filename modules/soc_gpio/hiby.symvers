@@ -1,0 +1,2 @@
+0x00000000	gpio_set_func	utils	EXPORT_SYMBOL
+0x00000000	str_to_gpio	utils	EXPORT_SYMBOL

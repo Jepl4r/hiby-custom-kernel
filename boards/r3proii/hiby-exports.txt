@@ -1,7 +1,5 @@
 # Symbols the HiBy modules loaded before ours export, which a module built
-# here may use: utils.ko (gpio_set_func, param_gpio_ops, gpio_to_str,
-# i2c_register_device, local_clock_ms, str_to_gpio, str_to_words,
-# str_free_words), soc_pwm.ko (pwm2_*), soc_adc.ko (adc_*), soc_fb.ko
+# here may use: soc_pwm.ko (pwm2_*), soc_adc.ko (adc_*), soc_fb.ko
 # (jzfb_register_lcd), soc_msc.ko, soc_utils.ko, and for the sound card
 # soc_aic.ko, sa_sound_hbc3000.ko and codec_cs43198_dual.ko.
 jzmmc_manual_detect
@@ -18,19 +16,11 @@ hbc3000_set_samplerate
 hbc3000_set_spdif_mode
 hbc3000_start
 hbc3000_stop
-gpio_set_func
-param_gpio_ops
-gpio_to_str
 pwm2_request
 pwm2_config
 pwm2_set_level
 pwm2_release
-i2c_register_device
-local_clock_ms
 adc_enable
 adc_disable
 adc_read_channel_voltage
-str_to_gpio
-str_to_words
-str_free_words
 jzfb_register_lcd
