@@ -13,7 +13,7 @@ On both players the resulting kernel:
 - **uses the board's original device tree**, byte for byte;
 - **adds what the stock kernel lacks:** compressed swap in RAM (zram, LZ4), about 1.1 MB of RAM freed and the deadline I/O scheduler;
 - **can replace the closed Wi-Fi/Bluetooth driver** `cywdhd.ko` with mainline `brcmfmac` and a small open board module, `bcm_wlbt_power` (see [Wi-Fi and Bluetooth](#wi-fi-and-bluetooth-without-cywdhd));
-- **comes with open sources for twenty-one of HiBy's closed modules**, drop-in replacements with the same file names, parameters and behaviour: the two sound card drivers, the DACs of both boards, the R3 Pro II's panel, the R1's touch panel, the fuel gauge, the efuse and thirteen smaller ones (see [Open HiBy modules](#open-hiby-modules)).
+- **comes with open sources for twenty-six of HiBy's closed modules**, drop-in replacements with the same file names, parameters and behaviour: the two sound card drivers, the DACs of both boards, the panels of both boards, the R1's touch panel, the fuel gauge, the efuse, the ADC, the DAC's I2C bus, the GPIO keys, the reserved-memory manager and thirteen smaller ones (see [Open HiBy modules](#open-hiby-modules)).
 
 Working on both players: boot, display and touch, audio (3.5 mm, the R3 Pro II's balanced output, DSD), Wi-Fi, Bluetooth, microSD, USB (ADB, mass storage, USB DAC, OTG), charging and LEDs.
 
@@ -49,7 +49,9 @@ The method, the Docker environment and three patches (0001, 0002, 0013) come fro
     modules/                    modules for every board, built out of tree:
       bcm_wlbt_power/             Wi-Fi/Bluetooth power for brcmfmac
       soc_utils/, pwm_backlight/, sa_config_module/,
-      sa_sound_switch/, sa_earpods_adc/               open HiBy modules
+      sa_sound_switch/, sa_earpods_adc/, soc_efuse/,
+      cw2015/, soc_adc/, rmem_manager/,
+      keyboard_gpio_add/, i2c_gpio_add/               open HiBy modules
     rootfs/                     files for the root filesystem of every player
     tools/extract-stock.py      device tree and symbols from the stock firmware
     tools/compare.py            comparison with the stock kernel
@@ -230,6 +232,11 @@ Open sources for closed modules of the stock firmware. Each `.ko` has the vendor
 | `cw2015.ko` | `modules/cw2015` | both | the CW2015 fuel gauge as the power supply `battery`: loads the battery profile from `fuel_gauge`, then capacity, voltage, status and time to empty every second |
 | `codec_cs43131.ko` | `boards/r1/modules` | R1 | the CS43131 DAC as the ASoC codec `cs43131-hifi`: power and reset per stream, the PCM and DSD register sets, volume, digital filter, `NOS_EN` and `DOP_EN`; `cs43131_set_power()` |
 | `cst8xx_touch.ko` | `boards/r1/modules` | R1 | the Hynitron CST8xx touch panel as the input device `hyn_ts`, one or two contacts (`cst_max_touch_number`), asleep while the screen is off |
+| `soc_adc.ko` | `modules/soc_adc` | both | the X1600 SAR ADC: `adc_enable()`, `adc_disable()`, `adc_read_channel_voltage()` for the key, jack and remote modules, and `/dev/jz_adc_aux_0..3` |
+| `rmem_manager.ko` | `modules/rmem_manager` | both | `/dev/rmem_manager`: physically contiguous buffers for user space, allocated, freed, synced and mapped through ioctls and `mmap`, from the `rmem=` region or DMA memory |
+| `keyboard_gpio_add.ko` | `modules/keyboard_gpio_add` | both | the keys on pins (power, next or previous track) as the input device `md-gpio-keys`, set up through the `keyboard` parameter; based on `drivers/input/keyboard/gpio_keys.c` |
+| `i2c_gpio_add.ko` | `modules/i2c_gpio_add` | both | bit-banged I2C buses added through the `i2c_bus` parameter (bus 3, the DAC's); `i2c-gpio.c` and `i2c-algo-bit.c` in one module, the algorithm as `md_i2c_bit_add_numbered_bus()` |
+| `lcd_lg35583.ko` | `boards/r1/modules` | R1 | the R1's 480x800 panel for `soc_fb.ko`: an LG35583 (16-bit SPI words) or an ST7701S (9-bit), told apart by ADC channel 3, set up at every screen-on; `/proc/lcd_reg` sets the LG35583's register C700 |
 
 `sa_config_module` is one source for every board: `build.sh` passes the board as `HIBY_MODEL`, which is also the model name the vendor module reports.
 
@@ -251,6 +258,11 @@ What differs from the vendor modules, on purpose:
 - **`cw2015`:** a load without the gauge on the bus, or with a `fuel_gauge` of the wrong length, fails (the vendor module loads and does nothing); a failed power supply or workqueue fails the probe, and remove stops the worker and frees what the probe took.
 - **`codec_cs43131`:** as for `codec_cs43198_dual`: `write_reg_val` and `reg_val` refuse a line they cannot parse, failed probes and remove give back the pins and the sysfs group, a failed driver registration fails the load, after remove `cs43131_set_power()` does nothing. `Digital Filter` sets the PCM filter (0..3, as on the CS43198), and `NOS_EN` turns on the CS43131's non-oversampling emulation; the vendor module's `Digital Filter` does nothing and it has no `NOS_EN`.
 - **`cst8xx_touch`:** it never writes firmware to the panel: the vendor module carries a firmware image and flashes it when the panel's version is older or its chip ID cannot be read. Without the vendor module's hex dump of every frame to the kernel log. The number of contacts comes from `cst_max_touch_number`, 1 or 2 (the vendor module reports one; Sonix patched its binary for two). Failed probes and unloading put each regulator once and give back the pins, the interrupt and the workqueue.
+- **`soc_adc`:** a missing clock, interrupt or misc device fails the load and gives back what was taken (the vendor module hits `BUG()` or carries on); the vref ioctl reads its argument with `get_user`.
+- **`rmem_manager`:** it no longer depends on `utils.ko`. User pointers go through `get_user`/`put_user`/`copy_from_user`; a failed allocation is not recorded (the vendor module records address 0 and frees it later), and a full block table fails the allocation. Failed loads unwind, a failed misc registration fails the probe, and remove frees the block table and empties the lists (the vendor module frees the first free block, which can be the list head).
+- **`keyboard_gpio_add`:** reading `keyboard` before `register` lists the keys written so far (the vendor module reads them through a pointer that is still NULL); a line refused frees its `tag`, `alloc=0` frees the parsed words, a failed registration gives the keys back and lists none. Unloading takes away the device registered through the parameter and the keys not registered.
+- **`i2c_gpio_add`:** a bus without `sda=` is refused (the vendor module registers it and the probe then fails); a failed registration also puts the device.
+- **`lcd_lg35583`:** as for `lcd_st7701_sbtc033001`, a missing vccio regulator also gives back the vcc one. `/proc/lcd_reg` reads at most 127 characters, terminates them and ignores a line without two numbers (the vendor module copies the whole write into a 128-byte stack buffer and parses it unterminated). Unloading removes `/proc/lcd_reg`; the vendor module leaves it pointing at freed code.
 
 ## zram on the device
 `rootfs/etc/init.d/S12zram.sh`, which `rcS` runs at boot:

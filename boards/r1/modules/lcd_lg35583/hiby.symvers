@@ -1,0 +1,6 @@
+0x00000000	jzfb_register_lcd	soc_fb	EXPORT_SYMBOL
+0x00000000	adc_enable	soc_adc	EXPORT_SYMBOL
+0x00000000	adc_disable	soc_adc	EXPORT_SYMBOL
+0x00000000	adc_read_channel_voltage	soc_adc	EXPORT_SYMBOL
+0x00000000	gpio_to_str	utils	EXPORT_SYMBOL
+0x00000000	param_gpio_ops	utils	EXPORT_SYMBOL
