@@ -15,9 +15,6 @@
 //   dcdc1 ... cpusldo      one per regulator, as "regulator_name=NAME
 //                          boot_on=enable|disable work_voltage=uV
 //                          suspend_volage=uV"; the name is not used
-//   charge_limit_percent   the charge limit the driver starts with, read at
-//                          load: 50 to 100 (a value outside is clamped), 100
-//                          for none; not in the stock script
 //
 // Loading creates the I2C device "axp2101_mfd". Its driver registers the
 // interrupt chip and the cells of the PMIC; two of them have drivers here:
@@ -36,26 +33,6 @@
 // five the charger has; axp_reg refuses a reserved selector in a voltage
 // register. The charge current is capped at 1000 mA and the input current
 // limit at 2000 mA, the top of their documented ranges.
-//
-// The charge limit, in two files next to the properties of "axp_battery":
-//
-//   charge_limit_percent   the battery level (of the power supply "battery",
-//                          the fuel gauge) at which charging stops; it starts
-//                          again 3 % below. 50 to 100; 100, the default, is
-//                          no limit.
-//   charge_limit_held      1 while charging is stopped at the limit
-//
-// Charging stops with the battery charge enable bit (REG18h bit 1), as
-// charge_control_limit_max = 100 does, so VBUS keeps supplying the system.
-//
-// Built for the R1 (HIBY_MODEL=r1, AXP2101_VBUS_WAKE), the PMIC's VBUS insert
-// and remove interrupts wake the system from suspend, so that a cable plugged
-// in during standby is seen and the charging LED comes on. On the R3 Pro II
-// the MP2731's interrupt does that, and this module has no interrupt of its
-// own.
-// While the cable is in and a limit is set, a wakeup source is held: a
-// suspend made through /sys/power/wakeup_count waits, since nothing would
-// watch the level otherwise.
 //
 // Loaded after utils.ko, which provides i2c_register_device() and the pin and
 // regulator parameters.
@@ -77,7 +54,6 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm.h>
-#include <linux/pm_wakeup.h>
 #include <linux/power_supply.h>
 #include <linux/regmap.h>
 #include <linux/regulator/driver.h>
@@ -161,14 +137,6 @@ struct pmu_param {
 
 #define AXP2101_ID		8	// the variant number of the vendor's AXP20x table
 
-#ifdef AXP2101_VBUS_WAKE
-// The PMIC's IRQ pin, open drain: its falling edge is a new interrupt.
-#define AXP2101_IRQ_TRIGGER	IRQF_TRIGGER_FALLING
-#else
-#define AXP2101_IRQ_TRIGGER	0
-#endif
-#define AXP2101_IRQ_VBUS_REMOVE	14	// REG41h bit 6
-#define AXP2101_IRQ_VBUS_INSERT	15	// REG41h bit 7
 #define AXP2101_CHIP_A		0x47	// REG03h with bits 5..4 cleared
 #define AXP2101_CHIP_B		0x4a
 #define AXP2101_I2C_ADDR	0x34
@@ -176,10 +144,6 @@ struct pmu_param {
 
 #define AXP_ICC_MAX_MA		1000	// REG62h 16; 17 to 31 are reserved
 #define AXP_IIN_MAX_SEL		5	// 2000 mA; 6 and 7 are reserved
-
-#define LIMIT_BATTERY		"battery"	// the fuel gauge, cw2015.ko
-#define LIMIT_HYSTERESIS	3		// percent
-#define LIMIT_MIN		50		// percent; a lower limit is refused
 
 // The regulators, in the order of the parameters and of their descriptions.
 enum {
@@ -474,7 +438,7 @@ int axp20x_device_probe(struct axp20x_dev *axp20x, struct axp_platform_data *pda
 
 	if (axp20x->irq) {
 		ret = regmap_add_irq_chip(axp20x->regmap, axp20x->irq,
-					  IRQF_ONESHOT | IRQF_SHARED | AXP2101_IRQ_TRIGGER, -1,
+					  IRQF_ONESHOT | IRQF_SHARED, -1,
 					  axp20x->regmap_irq_chip, &axp20x->regmap_irqc);
 		if (ret) {
 			dev_err(axp20x->dev, "failed to add irq chip: %d\n", ret);
@@ -856,7 +820,7 @@ enum {
 struct axp210x_info {
 	struct device *dev;
 	struct regmap *regmap;
-	struct mutex lock;		// charge_blocked, limit_held and the enable bit
+	struct mutex lock;		// charge_blocked and the enable bit
 	const u8 *model;		// the gauge's battery model
 	unsigned int model_len;
 	bool chip_b;			// REG03h 0x4a: battery presence from REG00h
@@ -885,23 +849,10 @@ struct axp210x_info {
 	int present;			// a battery is there
 	int full;			// charging done for more than a second
 	int gauge_ok;			// the gauge has run with its model
-
-	int limit_percent;		// charge_limit_percent, 100 for no limit
-	bool limit_held;		// charging stopped at the limit
-	bool limit_awake;		// limit_ws held
-	struct wakeup_source *limit_ws;
-
-#ifdef AXP2101_VBUS_WAKE
-	int vbus_irq[2];		// VBUS insert and remove, 0 when not requested
-	bool vbus_wake_armed;		// enable_irq_wake() done by the last suspend
-#endif
 };
 
 static struct axp210x_info *axp210x_info;
 static int dcdc3_pwm_in_run;
-
-// The charge_limit_percent parameter: the limit the driver starts with.
-static int charge_limit_percent = 100;
 
 static const u8 axp2101_model[128] = {
 	0x01, 0xf5, 0x00, 0x00, 0xfb, 0x00, 0x00, 0xfb, 0x00, 0x1e, 0x32, 0x01, 0x14, 0x04, 0xd8, 0x04,
@@ -1044,8 +995,8 @@ static unsigned int axp_cv_sel(unsigned int mv)
 	return 3;
 }
 
-// Writes the battery charge enable bit from charge_blocked and limit_held,
-// by a read and a write of REG18h. Called with info->lock held.
+// Writes the battery charge enable bit from charge_blocked, by a read and a
+// write of REG18h. Called with info->lock held.
 static int axp_charge_enable_write(struct axp210x_info *info)
 {
 	u8 val;
@@ -1054,7 +1005,7 @@ static int axp_charge_enable_write(struct axp210x_info *info)
 	ret = axp_read(info, AXP_MODULE_EN, &val, 1);
 	if (ret < 0)
 		return ret;
-	if (info->charge_blocked || info->limit_held)
+	if (info->charge_blocked)
 		val &= ~MODULE_EN_CHARGE;
 	else
 		val |= MODULE_EN_CHARGE;
@@ -1533,7 +1484,7 @@ static int axp210x_usb_set_property(struct power_supply *psy, enum power_supply_
 		mutex_lock(&info->lock);
 		info->charge_blocked = val->intval == 100;
 		regmap_update_bits(info->regmap, AXP_MODULE_EN, MODULE_EN_CHARGE,
-				   info->charge_blocked || info->limit_held ? 0 : MODULE_EN_CHARGE);
+				   info->charge_blocked ? 0 : MODULE_EN_CHARGE);
 		mutex_unlock(&info->lock);
 		axp_set_input_current_limit(info, info->input_limit);
 		return 0;
@@ -1571,122 +1522,19 @@ static ssize_t charger_store(struct device *dev, struct device_attribute *attr, 
 }
 static DEVICE_ATTR(charger, 0644, charger_show, charger_store);
 
-static ssize_t charge_limit_percent_show(struct device *dev, struct device_attribute *attr, char *buf)
-{
-	return sprintf(buf, "%d\n", READ_ONCE(axp210x_info->limit_percent));
-}
-
-static ssize_t charge_limit_percent_store(struct device *dev, struct device_attribute *attr,
-					  const char *buf, size_t count)
-{
-	int val, ret;
-
-	ret = kstrtoint(buf, 10, &val);
-	if (ret)
-		return ret;
-	if (val < LIMIT_MIN || val > 100)
-		return -EINVAL;
-
-	WRITE_ONCE(axp210x_info->limit_percent, val);
-	return count;
-}
-static DEVICE_ATTR_RW(charge_limit_percent);
-
-static ssize_t charge_limit_held_show(struct device *dev, struct device_attribute *attr, char *buf)
-{
-	return sprintf(buf, "%d\n", axp210x_info->limit_held);
-}
-static DEVICE_ATTR_RO(charge_limit_held);
-
-static struct attribute *axp_limit_attrs[] = {
-	&dev_attr_charge_limit_percent.attr,
-	&dev_attr_charge_limit_held.attr,
-	NULL,
-};
-
-static const struct attribute_group axp_limit_group = {
-	.attrs = axp_limit_attrs,
-};
-
-// The battery level, -errno when there is none to read.
-static int axp_battery_capacity(void)
-{
-	union power_supply_propval val;
-	struct power_supply *psy;
-	int ret;
-
-	psy = power_supply_get_by_name(LIMIT_BATTERY);
-	if (!psy)
-		return -ENODEV;
-
-	ret = power_supply_get_property(psy, POWER_SUPPLY_PROP_CAPACITY, &val);
-	power_supply_put(psy);
-	if (ret < 0)
-		return ret;
-
-	return val.intval;
-}
-
-// The charge limit, once a second. Without VBUS, or without a limit, charging
-// is never held. Without a battery level to judge by, nothing changes.
-static void axp_charge_limit_update(struct axp210x_info *info, bool online)
-{
-	int limit = READ_ONCE(info->limit_percent);
-	bool active = limit < 100 && online;
-	bool held = info->limit_held;
-	int ret;
-
-	if (!active) {
-		held = false;
-	} else {
-		int capacity = axp_battery_capacity();
-
-		if (capacity >= 0)
-			held = held ? capacity > limit - LIMIT_HYSTERESIS : capacity >= limit;
-	}
-
-	if (active != info->limit_awake) {
-		info->limit_awake = active;
-		if (active)
-			__pm_stay_awake(info->limit_ws);
-		else
-			__pm_relax(info->limit_ws);
-	}
-
-	if (held == info->limit_held)
-		return;
-
-	// A write that fails leaves the state as it was, for the next run.
-	mutex_lock(&info->lock);
-	info->limit_held = held;
-	ret = axp_charge_enable_write(info);
-	if (ret < 0)
-		info->limit_held = !held;
-	mutex_unlock(&info->lock);
-	if (ret < 0)
-		return;
-	dev_info(info->dev, "charging %s at the %d%% limit\n", held ? "held off" : "released", limit);
-	power_supply_changed(info->bat);
-}
-
-// Turns charging on, whatever the limit and charge_control_limit_max had
-// it at, at shutdown and removal; the monitor thread is stopped by then.
-static void axp_charge_limit_release(struct axp210x_info *info)
+// Turns charging on, whatever charge_control_limit_max had it at, at shutdown
+// and removal; the monitor thread is stopped by then.
+static void axp_charge_release(struct axp210x_info *info)
 {
 	mutex_lock(&info->lock);
-	info->limit_held = false;
 	info->charge_blocked = false;
 	axp_charge_enable_write(info);
 	mutex_unlock(&info->lock);
-	if (info->limit_awake) {
-		info->limit_awake = false;
-		__pm_relax(info->limit_ws);
-	}
 }
 
 // Once a second (the first time after 5 s): follows VBUS for the "usb" and
-// "ac" supplies, sets the charge current PLUG_SETTLE seconds after it comes,
-// and keeps the charge limit.
+// "ac" supplies, and sets the charge current PLUG_SETTLE seconds after it
+// comes.
 static int axp2101_monitor(void *data)
 {
 	struct axp210x_info *info = data;
@@ -1713,8 +1561,6 @@ static int axp2101_monitor(void *data)
 			if (++info->plug_count == PLUG_SETTLE)
 				axp_set_charge_current(info, info->charge_current);
 		}
-
-		axp_charge_limit_update(info, online);
 	}
 	return 0;
 }
@@ -1797,72 +1643,6 @@ static void axp210x_battery_check(struct work_struct *work)
 requeue:
 	queue_delayed_work(system_wq, &info->work, 50);
 }
-
-#ifdef AXP2101_VBUS_WAKE
-// A VBUS change: a wakeup event, which also stops a suspend on its way. The
-// monitor thread reads VBUS at its next run.
-static irqreturn_t axp_vbus_irq(int irq, void *data)
-{
-	struct axp210x_info *info = data;
-
-	pm_wakeup_event(info->dev, 0);
-	return IRQ_HANDLED;
-}
-
-static void axp_vbus_wake_free(struct axp210x_info *info)
-{
-	unsigned int i;
-
-	for (i = 0; i < ARRAY_SIZE(info->vbus_irq); i++) {
-		if (info->vbus_irq[i])
-			free_irq(info->vbus_irq[i], info);
-		info->vbus_irq[i] = 0;
-	}
-	device_init_wakeup(info->dev, false);
-}
-
-// Requests the VBUS insert and remove interrupts, which unmasks them in the
-// PMIC, and makes the device a wakeup source. Without them VBUS does not wake
-// the system, and nothing else changes.
-static void axp_vbus_wake_init(struct axp210x_info *info, struct axp20x_dev *axp20x)
-{
-	static const int hwirq[] = { AXP2101_IRQ_VBUS_INSERT, AXP2101_IRQ_VBUS_REMOVE };
-	static const char *const name[] = { "axp2101 vbus in", "axp2101 vbus out" };
-	unsigned int i;
-	int irq, ret;
-
-	for (i = 0; i < ARRAY_SIZE(hwirq); i++) {
-		irq = regmap_irq_get_virq(axp20x->regmap_irqc, hwirq[i]);
-		ret = irq > 0 ? request_threaded_irq(irq, NULL, axp_vbus_irq, IRQF_ONESHOT, name[i], info) : -ENXIO;
-		if (ret) {
-			dev_warn(info->dev, "VBUS does not wake the system: %d\n", ret);
-			axp_vbus_wake_free(info);
-			return;
-		}
-		info->vbus_irq[i] = irq;
-	}
-	device_init_wakeup(info->dev, true);
-}
-
-static void axp_vbus_wake_arm(struct axp210x_info *info, bool on)
-{
-	unsigned int i;
-
-	if (on == info->vbus_wake_armed || (on && (!info->vbus_irq[0] || !device_may_wakeup(info->dev))))
-		return;
-	for (i = 0; i < ARRAY_SIZE(info->vbus_irq); i++) {
-		if (on)
-			enable_irq_wake(info->vbus_irq[i]);
-		else
-			disable_irq_wake(info->vbus_irq[i]);
-	}
-	info->vbus_wake_armed = on;
-}
-#else
-static void axp_vbus_wake_init(struct axp210x_info *info, struct axp20x_dev *axp20x) {}
-static void axp_vbus_wake_free(struct axp210x_info *info) {}
-static void axp_vbus_wake_arm(struct axp210x_info *info, bool on) {}
-#endif
 
 static const struct axp_charger_pdata axp_charger_defaults = {
 	.charge_current = 300,
@@ -1979,7 +1759,6 @@ static int axp2101_charger_probe(struct platform_device *pdev)
 	info->model_len = sizeof(axp2101_model);
 	info->present = 1;
 	info->check = CHECK_RUN;
-	info->limit_percent = clamp(charge_limit_percent, LIMIT_MIN, 100);
 	if (!pd)
 		pd = &axp_charger_defaults;
 	info->charge_current = pd->charge_current;
@@ -2032,27 +1811,18 @@ static int axp2101_charger_probe(struct platform_device *pdev)
 		goto err;
 	}
 
-	// The charge limit works without its wakeup source, its files or the
-	// monitor thread: none of them failing stops the probe.
-	info->limit_ws = wakeup_source_register("axp2101-charge-limit");
-	if (!info->limit_ws)
-		dev_warn(info->dev, "no wakeup source for the charge limit\n");
-
 	ret = axp2101_power_supplies_register(info);
 	if (ret) {
 		// The model load may have turned charging off.
 		mutex_lock(&info->lock);
 		axp_charge_enable_write(info);
 		mutex_unlock(&info->lock);
-		wakeup_source_unregister(info->limit_ws);
 		goto err;
 	}
 
 	device_create_file(&info->bat->dev, &dev_attr_charger);
-	if (sysfs_create_group(&info->bat->dev.kobj, &axp_limit_group))
-		dev_warn(info->dev, "no charge limit files\n");
-	axp_vbus_wake_init(info, axp20x);
 
+	// Without the monitor thread the probe carries on.
 	info->thread = kthread_run(axp2101_monitor, info, "axp2101");
 	if (IS_ERR(info->thread)) {
 		dev_warn(info->dev, "no monitor thread: %ld\n", PTR_ERR(info->thread));
@@ -2073,19 +1843,17 @@ static int axp2101_charger_remove(struct platform_device *pdev)
 {
 	struct axp210x_info *info = platform_get_drvdata(pdev);
 
-	axp_vbus_wake_free(info);
 	if (info->thread)
 		kthread_stop(info->thread);
 	cancel_delayed_work_sync(&info->work);
-	axp_charge_limit_release(info);
+	axp_charge_release(info);
 	axp2101_power_supplies_unregister(info);
-	wakeup_source_unregister(info->limit_ws);
 	axp210x_info = NULL;
 	return 0;
 }
 
 // At power off: the ADC in its low-rate mode for the battery alone (REG36h
-// bit 7), charging on with the charge limit released, and the charge current
+// bit 7), charging on, and the charge current
 // for while the player is off.
 static void axp2101_shutdown(struct platform_device *pdev)
 {
@@ -2099,11 +1867,11 @@ static void axp2101_shutdown(struct platform_device *pdev)
 		kthread_stop(info->thread);
 		info->thread = NULL;
 	}
-	axp_charge_limit_release(info);
+	axp_charge_release(info);
 	axp_set_charge_current(info, info->shutdown_current);
 }
 
-// DCDC3 leaves forced PWM for the suspend, and VBUS becomes a wakeup.
+// DCDC3 leaves forced PWM for the suspend.
 static int axp2101_suspend(struct platform_device *pdev, pm_message_t state)
 {
 	struct axp210x_info *info = platform_get_drvdata(pdev);
@@ -2111,7 +1879,6 @@ static int axp2101_suspend(struct platform_device *pdev, pm_message_t state)
 	if (dcdc3_pwm_in_run)
 		regmap_update_bits(info->regmap, AXP_DCDC_PWM, BIT(4), 0);
 	cancel_delayed_work_sync(&info->work);
-	axp_vbus_wake_arm(info, true);
 	return 0;
 }
 
@@ -2119,7 +1886,6 @@ static int axp2101_resume(struct platform_device *pdev)
 {
 	struct axp210x_info *info = platform_get_drvdata(pdev);
 
-	axp_vbus_wake_arm(info, false);
 	if (dcdc3_pwm_in_run)
 		regmap_update_bits(info->regmap, AXP_DCDC_PWM, BIT(4), BIT(4));
 	queue_delayed_work(system_wq, &info->work, 50);
@@ -2305,7 +2071,6 @@ module_param(i2c_bus_num, int, 0644);
 module_param(charge_voltage_limit, int, 0644);
 module_param(charge_term_current, int, 0644);
 module_param(dcdc3_always_pwmmode, int, 0644);
-module_param(charge_limit_percent, int, 0644);
 
 MODULE_AUTHOR("Mattia D'Oronzo <doronzomattia26@icloud.com>");
 MODULE_DESCRIPTION("X-Powers AXP2101 PMIC: regulators, charger, fuel gauge");

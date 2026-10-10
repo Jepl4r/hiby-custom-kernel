@@ -45,13 +45,15 @@
 // The charge limit, in two files next to the properties:
 //
 //   charge_limit_percent   the battery level (of the power supply "battery",
-//                          the fuel gauge) at which charging stops; it starts
-//                          again 3 % below. 50 to 100; 100, the default, is
-//                          no limit.
+//                          the fuel gauge) at which charging stops. 50 to
+//                          100; 100, the default, is no limit.
 //   charge_limit_held      1 while charging is stopped at the limit
 //
 // Charging stops with CHG_CONFIG, as step_charging_enabled does, so the input
-// keeps supplying the system. While the cable is in and a limit is set, a
+// keeps supplying the system. The gauge reads a few percent lower within
+// seconds of charging stopping: charging starts again 3 % below the lowest
+// level of the 5 minutes after it stopped (counted at most 10 % below the
+// limit), not 3 % below the limit. While the cable is in and a limit is set, a
 // wakeup source is held: a suspend made through /sys/power/wakeup_count
 // waits, since nothing would watch the level otherwise.
 //
@@ -64,6 +66,7 @@
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
+#include <linux/jiffies.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/mutex.h>
@@ -86,8 +89,10 @@ extern struct i2c_client *i2c_register_device(struct i2c_board_info *info, int b
 #define MP2731_ID		0
 
 #define LIMIT_BATTERY		"battery"	// the fuel gauge, cw2015.ko
-#define LIMIT_HYSTERESIS	3		// percent
+#define LIMIT_HYSTERESIS	3		// percent below the settled level
 #define LIMIT_MIN		50		// percent; a lower limit is refused
+#define LIMIT_SETTLE		(300 * HZ)	// the level settling once charging stops
+#define LIMIT_SETTLE_DROP	10		// percent; the most the settled level counts below the limit
 
 // The charge_limit_percent parameter: the limit the driver starts with.
 static int charge_limit_percent = 100;
@@ -255,6 +260,9 @@ struct mp2731_device {
 	bool limit_held;	// charging stopped at the limit
 	bool limit_awake;	// limit_ws held
 	struct wakeup_source *limit_ws;
+	int limit_at;		// the limit charging is held at
+	int limit_floor;	// the lowest level since the hold, while it settles
+	unsigned long limit_since;	// jiffies at the hold
 };
 
 // The worker stages.
@@ -828,6 +836,27 @@ static int mp2731_battery_capacity(void)
 	return val.intval;
 }
 
+// Whether charging is held at the battery level capacity. The gauge reads
+// higher while the battery charges: within seconds of charging stopping, its
+// level drops a few percent. The lowest level of the LIMIT_SETTLE after the
+// hold is the level charging stopped at, at most LIMIT_SETTLE_DROP below the
+// limit, and charging starts again LIMIT_HYSTERESIS below it. A new limit
+// starts over.
+static bool mp2731_limit_hold(struct mp2731_device *mp, int limit, int capacity)
+{
+	if (!mp->limit_held || limit != mp->limit_at) {
+		mp->limit_at = limit;
+		mp->limit_floor = capacity;
+		mp->limit_since = jiffies;
+		return capacity >= limit;
+	}
+	if (time_before(jiffies, mp->limit_since + LIMIT_SETTLE)) {
+		mp->limit_floor = min(mp->limit_floor, capacity);
+		return true;
+	}
+	return capacity > clamp(mp->limit_floor, limit - LIMIT_SETTLE_DROP, limit) - LIMIT_HYSTERESIS;
+}
+
 // The charge limit, at every run of the worker. Without a cable, or without a
 // limit, charging is never held: the bit would survive the cable going out,
 // and the next cable would meet a charger that does nothing. Without a
@@ -844,7 +873,7 @@ static void mp2731_charge_limit_update(struct mp2731_device *mp, const struct mp
 		int capacity = mp2731_battery_capacity();
 
 		if (capacity >= 0)
-			held = held ? capacity > limit - LIMIT_HYSTERESIS : capacity >= limit;
+			held = mp2731_limit_hold(mp, limit, capacity);
 	}
 
 	if (active != mp->limit_awake) {
