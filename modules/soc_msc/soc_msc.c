@@ -40,6 +40,10 @@
 // core 1 s later. The bus clock pin is a GPIO input whenever the controller
 // clocks are off.
 //
+// On a slot with a card supply (the microSD), an unpowered card has its bus
+// lines driven low, the supply stays cut for at least 100 ms before it comes
+// back, and a card that fails to start is scanned twice more, 0.5 s apart.
+//
 // /sys/devices/platform/md_ingenic,mmc.N/present reads Y or N; on a
 // nonremovable host INSERT or REMOVE written there sets it.
 
@@ -173,6 +177,9 @@ int jzmmc_of_parse_voltage(int index, u32 *mask);
 #define CLK_RATE		24000000
 #define MAX_SEGS		128
 #define MSC_PINS		6	// clk, cmd, d0..d3
+#define POWER_OFF_MIN_MS	100	// a card is off this long before power returns
+#define RETRY_SCANS		2	// scans more for a card that does not start
+#define RETRY_DELAY_MS		500
 
 enum {
 	DONTCARE = 0,
@@ -273,6 +280,10 @@ struct ingenic_mmc_host {
 	int bus_pins;			// bus pins requested at probe
 	unsigned long desc_page;
 	char labels[4][12];		// the cd, wp, rst and pwr pin names
+	bool slot_pins;			// the cd, wp, rst and pwr pins are requested
+	bool card_off;			// the card supply is cut, the bus held low
+	unsigned long off_since;	// jiffies when the supply was cut
+	int retry_scans;		// scans left for a card that failed to start
 };
 
 // One controller's parameters and pins.
@@ -497,21 +508,24 @@ static inline int request_need_stop(struct mmc_request *mrq)
 }
 
 // The controller clocks, and the bus clock pin with them: back to the
-// controller when they go on, a GPIO input when they go off. Each call
-// enables or disables once; clk_count keeps the balance for remove.
+// controller when they go on, a GPIO input when they go off; while the card
+// supply is cut the pin stays driven low. Each call enables or disables
+// once; clk_count keeps the balance for remove.
 static void ingenic_mmc_clk_onoff(struct ingenic_mmc_host *host, unsigned int on)
 {
 	const struct msc_pin *clk_pin = &jzmsc_gpio[host->index].pins[0];
 
 	if (on) {
-		gpio_set_func(clk_pin->gpio, clk_pin->func);
+		if (!host->card_off)
+			gpio_set_func(clk_pin->gpio, clk_pin->func);
 		clk_prepare_enable(host->clk_cgu);
 		clk_prepare_enable(host->clk_gate);
 		atomic_inc(&host->clk_count);
 	} else {
 		clk_disable_unprepare(host->clk_cgu);
 		clk_disable_unprepare(host->clk_gate);
-		gpio_set_func(clk_pin->gpio, GPIO_INPUT);
+		if (!host->card_off)
+			gpio_set_func(clk_pin->gpio, GPIO_INPUT);
 		atomic_dec(&host->clk_count);
 	}
 }
@@ -1210,6 +1224,7 @@ static void ingenic_mmc_detect(unsigned long arg)
 				host->irq_disabled = false;
 			}
 			set_bit(INGENIC_MMC_CARD_PRESENT, &host->flags);
+			host->retry_scans = RETRY_SCANS;
 			ingenic_mmc_clk_onoff(host, 1);
 			mmc_detect_change(host->mmc, msecs_to_jiffies(1000));
 		}
@@ -1271,23 +1286,98 @@ EXPORT_SYMBOL(jzmmc_clk_ctrl);
 
 // --- host operations --------------------------------------------------------
 
+// The card supply: a regulator or the pwr pin, used once the slot pins are
+// requested. A host without one (the Wi-Fi's) leaves its card alone.
+static bool has_card_power(struct ingenic_mmc_host *host)
+{
+	if (!host->slot_pins)
+		return false;
+	if (host->power && !IS_ERR(host->power))
+		return true;
+	return host->pdata->gpio && gpio_is_valid(host->pdata->gpio->pwr.num);
+}
+
+// The bus lines of an unpowered card are driven low. Left to the
+// controller, CMD and DAT sit at their pull-ups and feed the card through
+// its input protection: it never drops to a full reset and can come back up
+// in a state where it stays busy for good. Given back, the clock pin goes
+// where the clocks have it.
+static void ingenic_mmc_bus_low(struct ingenic_mmc_host *host, bool low)
+{
+	const struct msc_pin *pins = jzmsc_gpio[host->index].pins;
+	int i;
+
+	for (i = 0; i < host->bus_pins; i++) {
+		int func = pins[i].func;
+
+		if (low)
+			func = GPIO_OUTPUT0;
+		else if (i == 0 && atomic_read(&host->clk_count) <= 0)
+			func = GPIO_INPUT;
+		gpio_set_func(pins[i].gpio, func);
+	}
+}
+
+static void ingenic_mmc_card_unpowered(struct ingenic_mmc_host *host)
+{
+	if (!host->card_off) {
+		ingenic_mmc_bus_low(host, true);
+		host->card_off = true;
+	}
+	host->off_since = jiffies;
+}
+
 static inline void ingenic_mmc_power_on(struct ingenic_mmc_host *host)
 {
+	bool was_off = has_card_power(host) && host->card_off;
+	unsigned long off = jiffies - host->off_since;
+	unsigned long min_off = msecs_to_jiffies(POWER_OFF_MIN_MS);
+
+	// The core powers a card up again 1 ms after a failed start: too short
+	// for the card to lose its state. Without a card seen in the slot no
+	// request reaches it, and nothing is waited for.
+	if (was_off && off < min_off && test_bit(INGENIC_MMC_CARD_PRESENT, &host->flags)) {
+		unsigned int ms = jiffies_to_msecs(min_off - off);
+
+		dev_info(host->dev, "%s: card powered off %u ms ago, on in %u ms\n", mmc_hostname(host->mmc),
+			 jiffies_to_msecs(off), ms);
+		msleep(ms);
+	}
+
 	if (host->power && !IS_ERR(host->power)) {
-		if (!host->power_enabled && !regulator_enable(host->power))
+		if (host->slot_pins && !host->power_enabled && !regulator_enable(host->power))
 			host->power_enabled = true;
-	} else if (host->pdata->gpio) {
+	} else if (host->pdata->gpio && host->slot_pins) {
 		set_pin_status(&host->pdata->gpio->pwr, 1);
+	}
+
+	if (was_off) {
+		ingenic_mmc_bus_low(host, false);
+		host->card_off = false;
 	}
 }
 
 static inline void ingenic_mmc_power_off(struct ingenic_mmc_host *host)
 {
 	if (host->power && !IS_ERR(host->power)) {
-		if (host->power_enabled && !regulator_disable(host->power))
+		if (host->slot_pins && host->power_enabled && !regulator_disable(host->power))
 			host->power_enabled = false;
-	} else if (host->pdata->gpio) {
+	} else if (host->pdata->gpio && host->slot_pins) {
 		set_pin_status(&host->pdata->gpio->pwr, 0);
+	}
+	if (!has_card_power(host))
+		return;
+	ingenic_mmc_card_unpowered(host);
+
+	// A card in the slot that the core powers off without having
+	// registered it failed to start: a new scan in a while, after a real
+	// power cycle.
+	if (test_bit(INGENIC_MMC_CARD_PRESENT, &host->flags) && !host->mmc->card &&
+	    host->retry_scans > 0 && !delayed_work_pending(&host->mmc->detect)) {
+		host->retry_scans--;
+		dev_warn(host->dev, "%s: card did not start, scanning again in %d ms\n",
+			 mmc_hostname(host->mmc), RETRY_DELAY_MS);
+		mmc_detect_change(host->mmc, msecs_to_jiffies(RETRY_DELAY_MS));
 	}
 }
 
@@ -1642,6 +1732,11 @@ static int ingenic_mmc_gpio_init(struct ingenic_mmc_host *host)
 		ingenic_mmc_init_gpio(&card_gpio->pwr, host->labels[3],
 				      card_gpio->pwr.enable_level ? GPIOF_OUT_INIT_LOW : GPIOF_OUT_INIT_HIGH);
 	}
+	host->slot_pins = true;
+	host->retry_scans = RETRY_SCANS;
+	// The supply starts cut: the bus goes low with it.
+	if (has_card_power(host))
+		ingenic_mmc_card_unpowered(host);
 
 	switch (host->pdata->removal) {
 	case NONREMOVABLE:
@@ -1867,6 +1962,7 @@ err_remove:
 	if (host->pdata->removal == MANUAL)
 		list_del(&host->list);
 	ingenic_mmc_stop_detect(host);
+	host->retry_scans = 0;
 	mmc_remove_host(mmc);
 	ingenic_mmc_gpio_deinit(host);
 	platform_set_drvdata(pdev, NULL);
@@ -1905,6 +2001,7 @@ static int mmc_ingenic_remove(struct platform_device *pdev)
 		list_del(&host->list);
 	sysfs_remove_group(&pdev->dev.kobj, &ingenic_mmc_attr_group);
 	ingenic_mmc_stop_detect(host);
+	host->retry_scans = 0;
 	mmc_remove_host(mmc);
 	ingenic_mmc_power_off(host);
 
@@ -1931,6 +2028,7 @@ static void mmc_ingenic_shutdown(struct platform_device *pdev)
 	struct ingenic_mmc_host *host = platform_get_drvdata(pdev);
 	struct card_gpio *card_gpio = host->pdata->gpio;
 
+	host->retry_scans = 0;
 	if (host->mmc->card && !mmc_card_sdio(host->mmc->card)) {
 		if (gpio_is_valid(card_gpio->rst.num))
 			gpio_direction_output(card_gpio->rst.num, 0);
@@ -1944,6 +2042,10 @@ static int mmc_ingenic_suspend(struct device *dev)
 {
 	struct ingenic_mmc_host *host = dev_get_drvdata(dev);
 
+	// The card, suspended before its host, is off for the whole sleep,
+	// which jiffies do not count.
+	if (host->card_off)
+		host->off_since = jiffies - msecs_to_jiffies(POWER_OFF_MIN_MS);
 	ingenic_mmc_clk_onoff(host, 0);
 	return 0;
 }
