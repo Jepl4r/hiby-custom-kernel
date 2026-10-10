@@ -92,21 +92,21 @@ static void m_spi_write(u16 val)
 
 	gpio_set_value(gpio_spi_sck, 0);
 	gpio_set_value(gpio_spi_cs, 0);
-	usleep_range(1, 1);
+	udelay(1);
 
 	for (i = 0; i < 9; i++) {
 		gpio_set_value(gpio_spi_mosi, (val & 0x100) ? 1 : 0);
 		val <<= 1;
 		gpio_set_value(gpio_spi_sck, 0);
-		usleep_range(1, 1);
+		udelay(1);
 		gpio_set_value(gpio_spi_sck, 1);
-		usleep_range(1, 1);
+		udelay(1);
 	}
 
-	usleep_range(1, 1);
+	udelay(1);
 	gpio_set_value(gpio_spi_cs, 1);
 	gpio_set_value(gpio_spi_mosi, 0);
-	usleep_range(1, 1);
+	udelay(1);
 }
 
 #define CMD(c)	(c)

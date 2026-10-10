@@ -118,7 +118,7 @@ static void m_spi_write(u16 val)
 
 	gpio_set_value(gpio_spi_sck, 0);
 	gpio_set_value(gpio_spi_cs, 0);
-	usleep_range(1, 1);
+	udelay(1);
 
 	for (i = 0; i < 16; i++) {
 		gpio_set_value(gpio_spi_mosi, (val & 0x8000) ? 1 : 0);
@@ -127,10 +127,10 @@ static void m_spi_write(u16 val)
 		gpio_set_value(gpio_spi_sck, 0);
 	}
 
-	usleep_range(1, 1);
+	udelay(1);
 	gpio_set_value(gpio_spi_cs, 1);
 	gpio_set_value(gpio_spi_mosi, 0);
-	usleep_range(1, 1);
+	udelay(1);
 }
 
 // One 9-bit word, MSB first, for the ST7701S: bit 8 is 0 for a command, 1
@@ -141,21 +141,21 @@ static void m_spi_write_addr_8(u16 val)
 
 	gpio_set_value(gpio_spi_sck, 0);
 	gpio_set_value(gpio_spi_cs, 0);
-	usleep_range(1, 1);
+	udelay(1);
 
 	for (i = 0; i < 9; i++) {
 		gpio_set_value(gpio_spi_mosi, (val & 0x100) ? 1 : 0);
 		val <<= 1;
 		gpio_set_value(gpio_spi_sck, 0);
-		usleep_range(1, 1);
+		udelay(1);
 		gpio_set_value(gpio_spi_sck, 1);
-		usleep_range(1, 1);
+		udelay(1);
 	}
 
-	usleep_range(1, 1);
+	udelay(1);
 	gpio_set_value(gpio_spi_cs, 1);
 	gpio_set_value(gpio_spi_mosi, 0);
-	usleep_range(1, 1);
+	udelay(1);
 }
 
 // An LG35583 register address: high byte, then low byte. Data follows as
