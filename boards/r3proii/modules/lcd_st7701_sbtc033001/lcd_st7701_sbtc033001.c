@@ -41,7 +41,7 @@ struct lcdc_data {
 	unsigned int lower_margin;
 	unsigned int hsync_len;
 	unsigned int vsync_len;
-	unsigned int fb_fmt;		// 1: RGB888 in memory
+	unsigned int fb_fmt;		// 1: RGB565 in memory
 	unsigned int lcd_mode;		// 0: parallel TFT
 	unsigned int out_format;	// 1: 18-bit RGB666 on the pins
 	unsigned int color_even;
