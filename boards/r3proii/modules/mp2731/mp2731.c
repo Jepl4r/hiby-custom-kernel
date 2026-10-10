@@ -51,8 +51,9 @@
 //   charge_limit_held      1 while charging is stopped at the limit
 //
 // Charging stops with CHG_CONFIG, as step_charging_enabled does, so the input
-// keeps supplying the system. While the cable is in and a limit is set, the
-// system is kept out of suspend: nothing would watch the level otherwise.
+// keeps supplying the system. While the cable is in and a limit is set, a
+// wakeup source is held: a suspend made through /sys/power/wakeup_count
+// waits, since nothing would watch the level otherwise.
 //
 // Loaded after utils.ko, which provides i2c_register_device() and the pin
 // parameters.
