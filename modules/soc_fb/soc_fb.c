@@ -353,7 +353,7 @@ void lcd_quick_stop_display(void);
 void lcd_start_simple_read(void);
 void lcdc_alloc_desc(void);
 void lcdc_srdma_init(void);
-void lcdc_pan_display(struct jzfb_par *par, unsigned int frame);
+int lcdc_pan_display(struct jzfb_par *par, unsigned int frame);
 
 // --- register helpers -------------------------------------------------------
 
@@ -1103,52 +1103,75 @@ void lcdc_srdma_init(void)
 // Shows frame: the next descriptor gets its address and is started; a
 // started fetch is waited for first on smart panels and afterwards on RGB
 // ones.
-void lcdc_pan_display(struct jzfb_par *par, unsigned int frame)
+int lcdc_pan_display(struct jzfb_par *par, unsigned int frame)
 {
 	struct lcdc_desc *desc;
 	unsigned long flags;
+	bool is_tft;
 	int ret = 0;
+	long waited;
+
+	if (!READ_ONCE(par->enabled))
+		return -EBUSY;
 
 	iob();			// the frame writes out of the write buffer
 	mutex_lock(&jzfb.lock);
+	if (!par->enabled) {
+		ret = -EBUSY;
+		goto out;
+	}
+	is_tft = LCD_MODE_IS_TFT(jzfb.pdata->lcd_mode);
+	if (!is_tft) {
+		if (READ_ONCE(jzfb.state) != JZFB_IDLE) {
+			waited = wait_event_timeout(jzfb.wait_queue,
+						    READ_ONCE(jzfb.state) == JZFB_FRAME_DONE,
+						    JZFB_WAIT_JIFFIES);
+			if (!waited) {
+				printk(KERN_EMERG "jzfb: slcd pan display wait timeout\n");
+				ret = -ETIMEDOUT;
+				goto out;
+			}
+		}
+		if (slcd_wait_busy_us(SLCD_BUSY_PAN_US)) {
+			ret = -ETIMEDOUT;
+			goto out;
+		}
+	}
 	jzfb.frame_idx++;
 	desc = jzfb.desc[jzfb.frame_idx % 2];
 	desc->addr = virt_to_phys((void *)(par->srdma.mem + frame * par->m.frame_size));
 
-	if (LCD_MODE_IS_TFT(jzfb.pdata->lcd_mode)) {
+	if (is_tft) {
 		spin_lock_irqsave(&jzfb.irq_lock, flags);
 		jzfb.state = JZFB_FETCHING;
 		writel(virt_to_phys(desc), LCDC_REG(LCDC_FRM_DESC));
 		writel(1, LCDC_REG(LCDC_FRM_START));
 		spin_unlock_irqrestore(&jzfb.irq_lock, flags);
-		wait_event_timeout(jzfb.wait_queue, jzfb.state == JZFB_FRAME_DONE, JZFB_WAIT_JIFFIES);
-		if (jzfb.state != JZFB_FRAME_DONE) {
+		waited = wait_event_timeout(jzfb.wait_queue,
+					    READ_ONCE(jzfb.state) == JZFB_FRAME_DONE,
+					    JZFB_WAIT_JIFFIES);
+		if (!waited) {
 			printk(KERN_EMERG "jzfb: tft pan display wait timeout %d\n", jzfb.state);
-			ret = -1;
+			goto unlock;
 		}
 	} else {
-		if (jzfb.state != JZFB_IDLE) {
-			wait_event_timeout(jzfb.wait_queue, jzfb.state == JZFB_FRAME_DONE,
-					   JZFB_WAIT_JIFFIES);
-			if (jzfb.state != JZFB_FRAME_DONE) {
-				printk(KERN_EMERG "jzfb: slcd pan display wait timeout\n");
-				ret = -1;
-				goto out;
-			}
-		}
-		slcd_wait_busy_us(SLCD_BUSY_PAN_US);
 		jzfb.state = JZFB_FETCHING;
 		writel(virt_to_phys(desc), LCDC_REG(LCDC_FRM_DESC));
 		writel(1, LCDC_REG(LCDC_FRM_START));
 	}
 out:
-	mutex_unlock(&jzfb.lock);
-
 	if (!ret && jzfb.pan_display_sync) {
-		wait_event_timeout(jzfb.wait_queue, jzfb.state == JZFB_FRAME_DONE, JZFB_WAIT_JIFFIES);
-		if (jzfb.state != JZFB_FRAME_DONE)
+		waited = wait_event_timeout(jzfb.wait_queue,
+					    READ_ONCE(jzfb.state) == JZFB_FRAME_DONE,
+					    JZFB_WAIT_JIFFIES);
+		if (!waited) {
 			printk(KERN_EMERG "jzfb: sync lcd pan display wait timeout\n");
+		}
 	}
+unlock:
+	/* A post-submit timeout cannot roll back FRM_START; keep the pan accepted. */
+	mutex_unlock(&jzfb.lock);
+	return ret;
 }
 
 // --- fb ops -----------------------------------------------------------------
@@ -1263,20 +1286,18 @@ static int jzfb_pan_display(struct fb_var_screeninfo *var, struct fb_info *info)
 	struct jzfb_par *par = info->par;
 	unsigned int frame;
 
-	if (var->xoffset != info->var.xoffset) {
-		printk(KERN_ERR "jzfb: No support for X panning for now\n");
+	if (!par->m.yres || var->xoffset != 0) {
+		printk(KERN_ERR "jzfb: invalid framebuffer geometry or X offset\n");
 		return -EINVAL;
 	}
-	frame = var->yoffset / var->yres;
+	if (var->yoffset % par->m.yres)
+		return -EINVAL;
+	frame = var->yoffset / par->m.yres;
 	if (frame >= par->m.frame_num) {
 		printk(KERN_ERR "jzfb: yoffset is out of framebuffer: %d\n", var->yoffset);
 		return -EINVAL;
 	}
-	if (!par->enabled)
-		return -EBUSY;
-
-	lcdc_pan_display(par, frame);
-	return 0;
+	return lcdc_pan_display(par, frame);
 }
 
 // Any other command does nothing and returns 0.
@@ -1401,7 +1422,7 @@ static void init_one_fb(void)
 	fb->fix.type = FB_TYPE_PACKED_PIXELS;
 	fb->fix.visual = FB_VISUAL_TRUECOLOR;
 	fb->fix.xpanstep = 0;
-	fb->fix.ypanstep = 1;
+	fb->fix.ypanstep = m->yres;
 	fb->fix.ywrapstep = 0;
 	fb->fix.line_length = m->line_length;
 	fb->fix.smem_start = virt_to_phys((void *)m->vaddr);
@@ -1487,6 +1508,7 @@ void jzfb_unregister_lcd(struct lcdc_data *pdata)
 		jzfb.enabled = 1;
 		disable_fb();
 	}
+	WRITE_ONCE(jzfb.par.enabled, 0);
 	if (jzfb.par.frame_num)
 		rmem_free(jzfb.par.mem, ALIGN(jzfb.par.mem_size, 64));
 	rmem_free((unsigned long)jzfb.desc[0], DESC_SIZE);
