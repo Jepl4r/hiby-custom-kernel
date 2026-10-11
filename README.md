@@ -38,7 +38,7 @@ The method, the Docker environment and three patches (0001, 0002, 0013) come fro
   hiby-custom-kernel/           this repository
     build.sh                    the build
     docker/Dockerfile           the environment (Debian bullseye, amd64)
-    patches/                    0001-0015, all applied, in order
+    patches/                    0001-0016, all applied, in order
     configs/                    configuration fragments, MODEL-*.config
     boards/MODEL/               one folder per player:
       modules-need.txt            the symbols the HiBy modules import
@@ -139,6 +139,7 @@ All of them are applied for every board; on the R1, 0004 is not built (no `CONFI
 | 0013 | memory: no HighAtomic reserve when a pageblock is nearly the whole zone (with `FORCE_MAX_ZONEORDER=15` a pageblock is 64 MB, the zone 56) (MatthewBriggs) |
 | 0014 | brcmfmac: the signal of the link in station mode, read with `GET_RSSI` when the firmware's `sta_info` has none, so `wpa_cli signal_poll` reports it |
 | 0015 | ALSA: the sample rates numbered as on the stock kernel, with 705600 Hz (bit 15) before 768000 Hz (bit 16). The HiBy modules use that numbering; without it DSD256 over DoP is refused |
+| 0016 | brcmfmac: configurable associated scan channel dwell (10-40 ms), while leaving unassociated, passive and explicit join timings unchanged |
 
 ## Configuration
 The fragments of the two boards differ only where their stock kernels do: the R1's has no Type-C class and no memory compaction. The two stock kernels are otherwise the same build, function for function.
@@ -182,7 +183,8 @@ Both players have a BCM43430 combo, either an AP6212A or an AzureWave AW-NB372SM
   - R3 Pro II: `wl_reg_on=PF02 wl_host_wake=PC25 wl_mmc=0 bt_reg_on=PF03 host_wake_bt=PF05`;
   - R1: `wl_reg_on=PB03 wl_host_wake=PA08 wl_mmc=0 bt_reg_on=PB04 host_wake_bt=PB05`.
 - **`rootfs/usr/bin/wlbt-wifi up|down`:**
-  - **up:** powers the chip, links the stock blob for the module in `/lib/firmware/wifi_bcm/` (`cyw43438-7.46.58.35.bin` + `nvram_azw372.txt` when `chipvendor` is `0x81`, AzureWave; `fw_bcm43438a1.bin` + `nvram_ap6212a.txt` otherwise, AP6212A) under the name `brcmfmac` asks for, loads the driver, waits for `wlan0` and gives it the stock MAC address.
+  - **up:** loads `brcmfmac` with an associated scan channel dwell of 20 ms by default. Set `BRCMFMAC_SCAN_ASSOC_TIME=40` in the loader's environment to restore the upstream 40 ms dwell; the loader accepts exact decimal values from 10 through 40 and falls back to 20 with a message for invalid input. The module parameter is read-only, so changing it requires unloading and reloading `brcmfmac`. For a different dwell, set `BRCMFMAC_SCAN_ASSOC_TIME` in the script that calls `wlbt-wifi` (for example `wifi_on.sh`). This shortens associated active scans to reduce Bluetooth traffic stalls during Wi-Fi scanning. On one HiBy R1 with Samsung Galaxy Buds2 Pro and AAC, three 40 ms scans measured maximum Bluetooth HCI transmit gaps of 64-155 ms, versus a baseline around 56 ms and 53-72 ms at 20 ms. The 20 ms setting is a measured mitigation for that R1/AAC setup, not a proven full cure or BT-aware scan coordination; other boards have not been tested. It can reduce discovery time/range during a scan; explicit join scans retain their 320/400 ms timing and are outside this mitigation.
+  - powers the chip and links the stock blob for the module in `/lib/firmware/wifi_bcm/` (`cyw43438-7.46.58.35.bin` + `nvram_azw372.txt` when `chipvendor` is `0x81`, AzureWave; `fw_bcm43438a1.bin` + `nvram_ap6212a.txt` otherwise, AP6212A) under the name `brcmfmac` asks for, loads the driver, waits for `wlan0` and gives it the stock MAC address.
   - **down:** unloads the driver and powers the chip down.
 
 Four changes to the stock scripts hand Wi-Fi over to it (the three scripts in `usr/bin` and `etc/init.d` are the same on both players):

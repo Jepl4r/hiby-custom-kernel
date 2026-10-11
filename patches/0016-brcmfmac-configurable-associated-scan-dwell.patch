@@ -1,0 +1,106 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: josegarita666 <josegarita@protonmail.com>
+Subject: [PATCH 16/16] brcmfmac: make associated scan dwell configurable
+
+Add a read-only scan_assoc_time module parameter (default 40 ms, decimal
+range 10-40) and use it for firmware initialization and cfg80211's
+associated-scan setting. Unassociated and passive scan dwell times and
+explicit join timing remain unchanged.
+
+---
+ drivers/net/wireless/brcm80211/brcmfmac/cfg80211.c | 2 +
+ drivers/net/wireless/brcm80211/brcmfmac/cfg80211.h | 1 -
+ drivers/net/wireless/brcm80211/brcmfmac/common.c   | 34 +++++++++++++++++++-
+ drivers/net/wireless/brcm80211/brcmfmac/common.h   | 1 +
+ 4 files changed, 35 insertions(+), 3 deletions(-)
+
+--- a/drivers/net/wireless/brcm80211/brcmfmac/cfg80211.c
++++ b/drivers/net/wireless/brcm80211/brcmfmac/cfg80211.c
+@@ -6028,7 +6028,7 @@
+ 	/* make sure RF is ready for work */
+ 	brcmf_fil_cmd_int_set(ifp, BRCMF_C_UP, 0);
+ 
+-	brcmf_dongle_scantime(ifp, WL_SCAN_CHANNEL_TIME,
++	brcmf_dongle_scantime(ifp, brcmf_scan_assoc_time,
+ 			      WL_SCAN_UNASSOC_TIME, WL_SCAN_PASSIVE_TIME);
+ 
+ 	power_mode = cfg->pwr_save ? PM_FAST : PM_OFF;
+--- a/drivers/net/wireless/brcm80211/brcmfmac/cfg80211.h
++++ b/drivers/net/wireless/brcm80211/brcmfmac/cfg80211.h
+@@ -30,7 +30,6 @@
+ #define WL_ROAM_DELTA			20
+ #define WL_BEACON_TIMEOUT		3
+ 
+-#define WL_SCAN_CHANNEL_TIME		40
+ #define WL_SCAN_UNASSOC_TIME		40
+ #define WL_SCAN_PASSIVE_TIME		120
+ 
+--- a/drivers/net/wireless/brcm80211/brcmfmac/common.c
++++ b/drivers/net/wireless/brcm80211/brcmfmac/common.c
+@@ -15,6 +15,7 @@
+  */
+ 
+ #include <linux/kernel.h>
++#include <linux/module.h>
+ #include <linux/string.h>
+ #include <linux/netdevice.h>
+ #include <brcmu_wifi.h>
+@@ -33,6 +34,37 @@
+ #define BRCMF_DEFAULT_SCAN_CHANNEL_TIME	40
+ #define BRCMF_DEFAULT_SCAN_UNASSOC_TIME	40
+ 
++#define BRCMF_MIN_SCAN_ASSOC_TIME		10
++#define BRCMF_MAX_SCAN_ASSOC_TIME		40
++
++unsigned int brcmf_scan_assoc_time = BRCMF_DEFAULT_SCAN_CHANNEL_TIME;
++
++static int brcmf_scan_assoc_time_set(const char *val,
++				     const struct kernel_param *kp)
++{
++	unsigned int scan_assoc_time;
++	int err;
++
++	err = kstrtouint(val, 10, &scan_assoc_time);
++	if (err)
++		return err;
++	if (scan_assoc_time < BRCMF_MIN_SCAN_ASSOC_TIME ||
++	    scan_assoc_time > BRCMF_MAX_SCAN_ASSOC_TIME)
++		return -EINVAL;
++
++	*(unsigned int *)kp->arg = scan_assoc_time;
++	return 0;
++}
++
++static const struct kernel_param_ops brcmf_scan_assoc_time_ops = {
++	.set = brcmf_scan_assoc_time_set,
++	.get = param_get_uint,
++};
++module_param_cb(scan_assoc_time, &brcmf_scan_assoc_time_ops,
++		&brcmf_scan_assoc_time, 0444);
++MODULE_PARM_DESC(scan_assoc_time,
++		 "Associated scan channel dwell time in ms (10-40)");
++
+ /* boost value for RSSI_DELTA in preferred join selection */
+ #define BRCMF_JOIN_PREF_RSSI_BOOST	8
+ 
+@@ -158,7 +190,7 @@
+ 
+ 	/* Setup default scan channel time */
+ 	err = brcmf_fil_cmd_int_set(ifp, BRCMF_C_SET_SCAN_CHANNEL_TIME,
+-				    BRCMF_DEFAULT_SCAN_CHANNEL_TIME);
++				    brcmf_scan_assoc_time);
+ 	if (err) {
+ 		brcmf_err("BRCMF_C_SET_SCAN_CHANNEL_TIME error (%d)\n",
+ 			  err);
+--- a/drivers/net/wireless/brcm80211/brcmfmac/common.h
++++ b/drivers/net/wireless/brcm80211/brcmfmac/common.h
+@@ -16,6 +16,7 @@
+ #define BRCMFMAC_COMMON_H
+ 
+ extern const u8 ALLFFMAC[ETH_ALEN];
++extern unsigned int brcmf_scan_assoc_time;
+ 
+ /* Sets dongle media info (drv_version, mac address). */
+ int brcmf_c_preinit_dcmds(struct brcmf_if *ifp);
+-- 
+2.39.0
