@@ -1305,16 +1305,26 @@ static int jzfb_mmap(struct fb_info *info, struct vm_area_struct *vma)
 	struct jzfb_par *par = info->par;
 	struct fb_info *fb = par->fb;
 	unsigned long len = fb->fix.smem_len;
-	unsigned long off, size;
+	unsigned long off, size, base;
 
+	if (vma->vm_end <= vma->vm_start)
+		return -EINVAL;
 	if (!len)
 		return -ENOMEM;
+	if (len > ULONG_MAX - (PAGE_SIZE - 1))
+		return -EINVAL;
+	if (vma->vm_pgoff > (ULONG_MAX >> PAGE_SHIFT))
+		return -EINVAL;
 	off = vma->vm_pgoff << PAGE_SHIFT;
 	size = vma->vm_end - vma->vm_start;
-	if (off + size > PAGE_ALIGN(len))
+	len = PAGE_ALIGN(len);
+	if (off > len || size > len - off)
 		return -EINVAL;
 
-	off += fb->fix.smem_start & PAGE_MASK;
+	base = fb->fix.smem_start & PAGE_MASK;
+	if (base > ULONG_MAX - off)
+		return -EINVAL;
+	off += base;
 	vma->vm_pgoff = off >> PAGE_SHIFT;
 	vma->vm_flags |= VM_IO;
 	pgprot_val(vma->vm_page_prot) &= ~_CACHE_MASK;
