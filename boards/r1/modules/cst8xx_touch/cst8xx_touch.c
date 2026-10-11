@@ -104,6 +104,7 @@ struct hyn_ts_data {
 	struct regulator *vdd;
 	struct regulator *vcc_i2c;
 	struct notifier_block fb_notif;
+	bool fb_notifier_registered;
 };
 
 static int cst_i2c_bus_num;
@@ -589,8 +590,12 @@ static int __init hyn_ts_init(void)
 	gpio_request(ts_data->irq_gpio, "tp_irq");
 
 	ts_data->ts_workqueue = create_singlethread_workqueue("hyn_wq");
-	if (!ts_data->ts_workqueue)
+	if (!ts_data->ts_workqueue) {
 		printk(KERN_ERR "[HYN_TS/E]%s:create fts workqueue fail\n", "hyn_ts_probe_entry");
+		ret = -ENOMEM;
+		goto err_gpio;
+	}
+	INIT_WORK(&ts_data->resume_work, hyn_resume_work);
 	mutex_init(&ts_data->report_mutex);
 	mutex_init(&ts_data->bus_lock);
 
@@ -625,12 +630,13 @@ static int __init hyn_ts_init(void)
 		goto err_power;
 	}
 
-	if (ts_data->ts_workqueue)
-		INIT_WORK(&ts_data->resume_work, hyn_resume_work);
 	ts_data->fb_notif.notifier_call = fb_notifier_callback;
 	ret = fb_register_client(&ts_data->fb_notif);
-	if (ret)
+	if (ret) {
 		printk(KERN_ERR "[HYN_TS/E]%s:[FB]Unable to register fb_notifier: %d\n", "hyn_ts_probe_entry", ret);
+	} else {
+		ts_data->fb_notifier_registered = true;
+	}
 
 	printk(KERN_INFO "[HYN_TS/I]%s:Touch Screen(I2C BUS) driver prboe successfully\n", "hyn_ts_probe");
 	return 0;
@@ -642,8 +648,10 @@ err_power:
 err_input:
 	input_unregister_device(ts_data->input_dev);
 err_gpio:
-	if (ts_data->ts_workqueue)
+	if (ts_data->ts_workqueue) {
+		cancel_work_sync(&ts_data->resume_work);
 		destroy_workqueue(ts_data->ts_workqueue);
+	}
 	gpio_free(ts_data->irq_gpio);
 	gpio_free(ts_data->reset_gpio);
 	printk(KERN_ERR "[HYN_TS/E]%s:Touch Screen(I2C BUS) driver probe fail\n", "hyn_ts_probe");
@@ -660,14 +668,16 @@ static void __exit hyn_ts_exit(void)
 {
 	struct hyn_ts_data *ts = hyn_data;
 
-	free_irq(ts->irq, ts);
-	if (fb_unregister_client(&ts->fb_notif))
+	if (ts->fb_notifier_registered && fb_unregister_client(&ts->fb_notif))
 		printk(KERN_ERR "[HYN_TS/E]%s:Error occurred while unregistering fb_notifier.\n",
 		       "hyn_ts_remove_entry");
+	if (ts->ts_workqueue) {
+		cancel_work_sync(&ts->resume_work);
+		destroy_workqueue(ts->ts_workqueue);
+	}
+	free_irq(ts->irq, ts);
 	input_unregister_device(ts->input_dev);
 	i2cdev_exit();
-	if (ts->ts_workqueue)
-		destroy_workqueue(ts->ts_workqueue);
 	hyn_power_source_exit(ts);
 	gpio_free(ts->irq_gpio);
 	gpio_free(ts->reset_gpio);
