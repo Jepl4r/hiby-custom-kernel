@@ -358,6 +358,10 @@ static int cs43131_dai_prepare(struct snd_pcm_substream *substream, struct snd_s
 	unsigned int rate = params_rate(&cs43131->params);
 	const struct cs43131_reg *r;
 
+	/* DSD saves 5 in the persistent register table; restore PCM's 0 before replay. */
+	if (!cs43131->dsd_en)
+		cs43131_write_reg_save(CS43131_SP_BITSIZE, 0);
+
 	for (r = cs43131_reg; r->reg != CS43131_REG_END; r++) {
 		mutex_lock(&cs43131->reg_mutex);
 		cs43131_i2c_write_reg(r->reg, r->val);
@@ -655,21 +659,30 @@ static int cs43131_i2c_probe(struct i2c_client *client, const struct i2c_device_
 		goto err_free;
 	}
 
-	sysfs_create_group(&dev->kobj, &sys_codec_group);
+	/* Publish only fully initialized state to sysfs and ASoC callbacks. */
+	mutex_init(&cs43131->reg_mutex);
+	cs43131->powered = 0;
+	cs43131->dsd_en = 0;
+	g_cs43131 = cs43131;
+
+	ret = sysfs_create_group(&dev->kobj, &sys_codec_group);
+	if (ret < 0) {
+		printk("[CS43131_MX30] Create codec sysfs group failed.\n");
+		goto err_published;
+	}
 
 	ret = snd_soc_register_codec(dev, &cs43131_codec_drv, &cs43131_dai_drv, 1);
 	if (ret < 0) {
 		printk("[CS43131_MX30] Register codec failed.\n");
 		sysfs_remove_group(&dev->kobj, &sys_codec_group);
-		cs43131_free_gpios(pdata);
-		goto err_free;
+		goto err_published;
 	}
 
-	g_cs43131 = cs43131;
-	mutex_init(&cs43131->reg_mutex);
-	cs43131->powered = 0;
 	return 0;
 
+err_published:
+	g_cs43131 = NULL;
+	cs43131_free_gpios(pdata);
 err_free:
 	this_i2c = NULL;
 	i2c_set_clientdata(client, NULL);
