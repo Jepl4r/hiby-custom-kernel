@@ -16,6 +16,12 @@
 // last value written to each of its registers. Registers are written only
 // while a stream is open.
 //
+// Unlike the vendor module, neither end of a stream pops: the register set is
+// loaded with both paths muted and the headphone amplifier brought up as the
+// mainline cs43130 driver brings up the CS43131's, and a stream's end mutes the
+// paths and powers the amplifier down through PDN_HP before the power pin
+// goes.
+//
 // Mixer controls (reading any of them returns 0):
 //   Left/Right Playback Volume   0..255, the attenuation register value
 //   DOP_EN           1: the next stream is DSD over PCM
@@ -52,14 +58,22 @@ extern const struct kernel_param_ops param_gpio_ops;
 extern struct i2c_client *i2c_register_device(struct i2c_board_info *info, int busnum);
 
 // Registers, 24-bit addresses.
+#define CS43131_DXD1		0x010010
 #define CS43131_SP_SRATE	0x01000b
 #define CS43131_SP_BITSIZE	0x01000c
+#define CS43131_PWDN_CTL	0x020000
 #define CS43131_DSD_VOL_B	0x070000
 #define CS43131_DSD_VOL_A	0x070001
+#define CS43131_DSD_PATH_CTL_1	0x070002
 #define CS43131_DSD_PATH_CTL_2	0x070004
+#define CS43131_DXD13		0x080032
 #define CS43131_PCM_FILTER	0x090000
 #define CS43131_PCM_VOL_B	0x090001
 #define CS43131_PCM_VOL_A	0x090002
+#define CS43131_PCM_PATH_CTL_1	0x090003
+
+#define CS43131_PDN_HP		0x10	// PWDN_CTL: the headphone amplifier
+#define CS43131_MUTE		0x03	// PCM and DSD path control 1: both channels
 
 #define CS43131_REG_END		0xffffff
 
@@ -191,6 +205,47 @@ static int cs43131_write_reg_save(unsigned int reg, u8 val)
 	return ret;
 }
 
+// The value the register set holds for reg, or -1.
+static int cs43131_saved_reg(unsigned int reg)
+{
+	struct cs43131_reg *r;
+
+	for (r = cs43131_reg; r->reg != CS43131_REG_END; r++)
+		if (r->reg == reg)
+			return r->val;
+	return -1;
+}
+
+// Both paths muted or back to the register set, which is unmuted. Called with
+// reg_mutex held.
+static void cs43131_mute_paths(bool mute)
+{
+	int pcm = cs43131_saved_reg(CS43131_PCM_PATH_CTL_1);
+	int dsd = cs43131_saved_reg(CS43131_DSD_PATH_CTL_1);
+
+	if (pcm >= 0)
+		cs43131_i2c_write_reg(CS43131_PCM_PATH_CTL_1, mute ? pcm | CS43131_MUTE : pcm);
+	if (dsd >= 0)
+		cs43131_i2c_write_reg(CS43131_DSD_PATH_CTL_1, mute ? dsd | CS43131_MUTE : dsd);
+}
+
+// The headphone amplifier up, the way the mainline cs43130 driver brings up
+// the CS43131's: the pop-free setting held around the PDN_HP write and let go
+// once the output has settled (its "HiFi DAC" widget, before and after power
+// up). Called with reg_mutex held.
+static void cs43131_hp_power_up(u8 pwdn)
+{
+	cs43131_i2c_write_reg(CS43131_DXD1, 0x99);
+	cs43131_i2c_write_reg(CS43131_DXD13, 0x20);
+	cs43131_i2c_write_reg(CS43131_DXD1, 0);
+	cs43131_i2c_write_reg(CS43131_PWDN_CTL, pwdn);
+	usleep_range(10000, 10050);
+	cs43131_i2c_write_reg(CS43131_DXD1, 0x99);
+	usleep_range(12000, 12010);
+	cs43131_i2c_write_reg(CS43131_DXD13, 0);
+	cs43131_i2c_write_reg(CS43131_DXD1, 0);
+}
+
 // Drives the power pin: called by x1600_hiby_r1_sound_card.ko on output
 // changes.
 void cs43131_set_power(int on)
@@ -308,12 +363,26 @@ static int cs43131_dai_startup(struct snd_pcm_substream *substream, struct snd_s
 	return 0;
 }
 
+// The supply is not cut under a running headphone amplifier: that is the pop
+// at every pause and every play. The paths are muted, the amplifier is
+// powered down through PDN_HP, which ramps its output down, and only then do
+// the power and reset pins go.
 static void cs43131_dai_shutdown(struct snd_pcm_substream *substream, struct snd_soc_dai *dai)
 {
 	struct cs43131_priv *cs43131 = snd_soc_codec_get_drvdata(dai->codec);
 	struct cs43131_pdata *pdata = cs43131->pdata;
+	int pwdn;
 
+	mutex_lock(&cs43131->reg_mutex);
+	pwdn = cs43131_saved_reg(CS43131_PWDN_CTL);
+	if (cs43131->powered && pwdn >= 0) {
+		cs43131_mute_paths(true);
+		usleep_range(10000, 10050);
+		cs43131_i2c_write_reg(CS43131_PWDN_CTL, pwdn | CS43131_PDN_HP);
+		msleep(20);
+	}
 	cs43131->powered = 0;
+	mutex_unlock(&cs43131->reg_mutex);
 	if (gpio_is_valid(pdata->power_gpio))
 		gpio_set_value(pdata->power_gpio, 0);
 	if (gpio_is_valid(pdata->reset_gpio))
@@ -362,9 +431,17 @@ static int cs43131_dai_prepare(struct snd_pcm_substream *substream, struct snd_s
 	if (!cs43131->dsd_en)
 		cs43131_write_reg_save(CS43131_SP_BITSIZE, 0);
 
+	// The register set is replayed with both paths muted, and the amplifier
+	// is brought up as the mainline driver does it. The paths are let go at
+	// the end, once the stream's settings are in.
 	for (r = cs43131_reg; r->reg != CS43131_REG_END; r++) {
 		mutex_lock(&cs43131->reg_mutex);
-		cs43131_i2c_write_reg(r->reg, r->val);
+		if (r->reg == CS43131_PCM_PATH_CTL_1 || r->reg == CS43131_DSD_PATH_CTL_1)
+			cs43131_i2c_write_reg(r->reg, r->val | CS43131_MUTE);
+		else if (r->reg == CS43131_PWDN_CTL && !(r->val & CS43131_PDN_HP))
+			cs43131_hp_power_up(r->val);
+		else
+			cs43131_i2c_write_reg(r->reg, r->val);
 		mutex_unlock(&cs43131->reg_mutex);
 	}
 
@@ -391,6 +468,10 @@ static int cs43131_dai_prepare(struct snd_pcm_substream *substream, struct snd_s
 		cs43131_write_reg_save(CS43131_DSD_PATH_CTL_2, 0x02);
 		cs43131_write_reg_save(CS43131_SP_SRATE, cs43131_pcm_speed(rate));
 	}
+
+	mutex_lock(&cs43131->reg_mutex);
+	cs43131_mute_paths(false);
+	mutex_unlock(&cs43131->reg_mutex);
 	return 0;
 }
 
