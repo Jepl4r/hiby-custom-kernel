@@ -53,6 +53,7 @@ extern struct i2c_client *i2c_register_device(struct i2c_board_info *info, int b
 #define MODE_SLEEP		0xc0
 #define MODE_NORMAL		0x00
 #define MODE_RESTART		0x0f
+#define MODE_QUICK_START	0x30
 
 #define SIZE_BATINFO		64
 
@@ -110,6 +111,22 @@ static int suspend_resume_mark;
 static int charging_time_loop;
 static int charging_zero_loop;
 static int reset_loop;
+
+// A gauge stuck at 0 %. After the cell has been run right down the gauge can
+// hold 0 % at any voltage, and only a restart brings it back. A cell at
+// ZERO_SOC_MIN_MV or more is not empty, so after that many readings in a row
+// the gauge is quick-started: it estimates the level again from the voltage,
+// and keeps its profile. A charger lifts the voltage of an empty cell for a
+// while, so on a charger it takes longer, and it happens at most once every
+// ZERO_SOC_RETRY_S.
+#define ZERO_SOC_MIN_MV		3700
+#define ZERO_SOC_READINGS	10	// 10 s
+#define ZERO_SOC_READINGS_CHG	120	// 2 min
+#define ZERO_SOC_RETRY_S	600
+
+static int zero_soc_loop;
+static bool zero_soc_restarted;
+static unsigned long zero_soc_at;	// jiffies of the last quick start
 
 static struct power_supply *chrg_ac_psy;
 static struct power_supply *chrg_usb_psy;
@@ -233,6 +250,20 @@ static int cw_init(struct cw_battery *cw_bat)
 	return -1;
 }
 
+// The level estimated again from the voltage now; the profile stays.
+static int cw_quick_start(struct cw_battery *cw_bat)
+{
+	u8 reg_val = MODE_QUICK_START;
+	int ret;
+
+	ret = cw_write(cw_bat->client, REG_MODE, &reg_val);
+	if (ret < 0)
+		return ret;
+	msleep(100);
+	reg_val = MODE_NORMAL;
+	return cw_write(cw_bat->client, REG_MODE, &reg_val);
+}
+
 // Power-on reset: sleep, wake, set up again.
 static int cw_por(struct cw_battery *cw_bat)
 {
@@ -276,7 +307,27 @@ static int cw_get_capacity(struct cw_battery *cw_bat)
 	}
 	reset_loop = 0;
 
-	// So does 0 % for 30 minutes on a charger.
+	// 0 % from a cell that is plainly not empty: see ZERO_SOC_MIN_MV. The
+	// next reading has the new estimate.
+	if (real_soc == 0 && cw_bat->voltage >= ZERO_SOC_MIN_MV) {
+		int need = cw_bat->charger_mode > 0 ? ZERO_SOC_READINGS_CHG : ZERO_SOC_READINGS;
+
+		if (++zero_soc_loop >= need &&
+		    (!zero_soc_restarted || time_after(jiffies, zero_soc_at + ZERO_SOC_RETRY_S * HZ))) {
+			printk("cw2015: 0 %% at %d mV, quick start\n", cw_bat->voltage);
+			zero_soc_loop = 0;
+			zero_soc_restarted = true;
+			zero_soc_at = jiffies;
+			ret = cw_quick_start(cw_bat);
+			if (ret < 0)
+				return ret;
+			return cw_bat->capacity;
+		}
+	} else {
+		zero_soc_loop = 0;
+	}
+
+	// 0 % for 30 minutes on a charger resets the gauge too.
 	if (cw_bat->charger_mode > 0 && real_soc == 0) {
 		if (++charging_zero_loop > 1800) {
 			cw_por(cw_bat);
