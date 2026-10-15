@@ -1,2 +1,3 @@
 0x00000000	i2c_register_device	utils	EXPORT_SYMBOL
 0x00000000	param_gpio_ops	utils	EXPORT_SYMBOL
+0x00000000	aic_playback_hooks	soc_aic	EXPORT_SYMBOL

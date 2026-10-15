@@ -22,7 +22,10 @@
 //
 // Exported: aic_slave_trigger(start, stop), callbacks for the sound card,
 // called with the sample rate around the start of playback when the codec
-// side is the clock master.
+// side is the clock master; aic_playback_hooks(quiet, wake), callbacks for
+// the codec while the AIC drives the clocks: quiet before playback stops,
+// with the clocks still running and silence going out, and wake once
+// playback has started.
 
 #include <linux/clk.h>
 #include <linux/delay.h>
@@ -133,6 +136,8 @@ module_param(aic_send_invalid_data_time_ms, int, 0644);
 
 static void (*aic_slave_trigger_start)(void *data);
 static void (*aic_slave_trigger_stop)(void *data);
+static void (*aic_playback_quiet)(void);
+static void (*aic_playback_wake)(void);
 
 // Clocks set to the MCLK rate at every hw_params: the i2s0t ones for
 // playback, the i2s0r ones for capture.
@@ -231,6 +236,15 @@ void aic_slave_trigger(void (*start)(void *data), void (*stop)(void *data))
 	aic_slave_trigger_stop = stop;
 }
 EXPORT_SYMBOL(aic_slave_trigger);
+
+// quiet is called from the ordered workqueue and may sleep; wake is called
+// there too and must not, or a stop waits for it.
+void aic_playback_hooks(void (*quiet)(void), void (*wake)(void))
+{
+	aic_playback_quiet = quiet;
+	aic_playback_wake = wake;
+}
+EXPORT_SYMBOL(aic_playback_hooks);
 
 static void aic_slave_start(void)
 {
@@ -672,6 +686,8 @@ static void start_work(struct work_struct *work)
 		mutex_unlock(&aic_dev.mutex);
 		aic_slave_start();
 		mutex_unlock(&s->mutex);
+		if (aic_playback_wake)
+			aic_playback_wake();
 		return;
 	}
 
@@ -703,6 +719,117 @@ static void start_work(struct work_struct *work)
 	mutex_unlock(&s->mutex);
 }
 
+// The quiet stop, with the codec's quiet callback set. The music still to be
+// played fades out over a few milliseconds, then silence goes out from a
+// buffer of its own while the codec quiets down, the clocks still running.
+//
+// The ALSA buffer is let go first: the timer stops and the position goes
+// back to 0, as after a stop. The fade is written into it only while the
+// stream is still stopped, checked under the stream lock: after a prepare it
+// may already hold the next stream's data (a seek is a drop, a prepare and a
+// start), and is then left alone and the silence starts at once.
+#define QUIET_LEAD_MS	1	// ahead of the DMA, where the fade starts
+#define QUIET_FADE_MS	4
+#define QUIET_ZERO_MS	200	// after the fade: more than the DMA plays before the switch
+#define QUIET_WAIT_MS	30	// at most, for the DMA to get past the fade
+#define QUIET_SILENCE	4096	// bytes of the silence buffer
+
+static void *quiet_silence;
+
+static void aic_fade_sample(void *p, u32 width, int gain)
+{
+	if (width == 2) {
+		s16 *v = p;
+
+		*v = *v * gain / 256;
+	} else {
+		s32 v = *(s32 *)p << 8 >> 8;
+
+		*(s32 *)p = v * gain / 256;
+	}
+}
+
+// Zeroes len bytes of the ring from off, across its end.
+static void aic_ring_zero(struct aic_stream *s, u32 off, u32 len)
+{
+	u32 first = min(len, s->buf_bytes - off);
+
+	memset(s->dma_area + off, 0, first);
+	if (len > first)
+		memset(s->dma_area, 0, len - first);
+}
+
+// Fades the ring out from just ahead of the DMA and silences what follows.
+// Returns the bytes from *pos to the end of the fade, or 0 if the ring was
+// left alone.
+static u32 aic_quiet_fade(struct aic_stream *s, u32 *pos)
+{
+	struct snd_pcm_substream *sub = s->substream;
+	u32 frame = s->frame_bytes;
+	u32 width = s->format == SNDRV_PCM_FORMAT_S24_LE ? 4 : 2;
+	u32 per_ms = aic_dev.rate * frame / 1000;
+	u32 lead = roundup(QUIET_LEAD_MS * per_ms, frame);
+	u32 fade = roundup(QUIET_FADE_MS * per_ms, frame);
+	u32 zero = QUIET_ZERO_MS * per_ms;
+	u32 frames = fade / frame, i, b, off;
+	dma_addr_t phys = virt_to_phys(s->dma_area);
+	bool stopped;
+
+	if (!frame || !sub->runtime || lead + fade >= s->buf_bytes / 2)
+		return 0;
+	zero = min(zero, s->buf_bytes - lead - fade);
+
+	snd_pcm_stream_lock_irq(sub);
+	stopped = sub->runtime->status->state == SNDRV_PCM_STATE_SETUP;
+	if (stopped) {
+		*pos = get_dma_addr(s->dma.chan, phys, s->dma_range, DMA_MEM_TO_DEV) - phys;
+		*pos = roundup(*pos, frame) % s->buf_bytes;
+		for (i = 0; i < frames; i++) {
+			int gain = (frames - i) * 256 / frames;
+
+			off = (*pos + lead + i * frame) % s->buf_bytes;
+			for (b = 0; b < frame; b += width)
+				aic_fade_sample(s->dma_area + off + b, width, gain);
+		}
+		aic_ring_zero(s, (*pos + lead + fade) % s->buf_bytes, zero);
+		dma_cache_sync(NULL, s->dma_area, s->buf_bytes, DMA_TO_DEVICE);
+	}
+	snd_pcm_stream_unlock_irq(sub);
+	return stopped ? lead + fade : 0;
+}
+
+static void aic_quiet_stop(struct aic_stream *s)
+{
+	dma_addr_t phys = virt_to_phys(s->dma_area);
+	u32 pos = 0, len, done, i;
+
+	hrtimer_cancel(&s->timer);
+	s->dma_pos = 0;
+
+	// Silence follows the fade far further than the DMA gets in the wait,
+	// so a late wake-up only plays more of it.
+	len = aic_quiet_fade(s, &pos);
+	for (i = 0; len && i < QUIET_WAIT_MS; i++) {
+		usleep_range(1000, 1100);
+		done = get_dma_addr(s->dma.chan, phys, s->dma_range, DMA_MEM_TO_DEV) - phys;
+		done = (done + s->buf_bytes - pos) % s->buf_bytes;
+		// More than half a ring is the DMA still short of pos.
+		if (done >= len + s->frame_bytes * 32 && done < s->buf_bytes / 2)
+			break;
+	}
+
+	// Silence from a buffer of its own: the ALSA one may be filling again.
+	if (!quiet_silence) {
+		quiet_silence = m_dma_alloc_coherent(QUIET_SILENCE);
+		memset(quiet_silence, 0, QUIET_SILENCE);
+		dma_cache_sync(NULL, quiet_silence, QUIET_SILENCE, DMA_TO_DEVICE);
+	}
+	aic_dma_terminate(s);
+	aic_dma_invalid_data_cyclic(&s->dma, DMA_MEM_TO_DEV, quiet_silence, QUIET_SILENCE);
+
+	aic_playback_quiet();
+}
+
 static void stop_work(struct work_struct *work)
 {
 	struct aic_stream *s = container_of(work, struct aic_stream, stop_work);
@@ -711,6 +838,8 @@ static void stop_work(struct work_struct *work)
 		return;
 
 	if (s->substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+		if (aic_playback_quiet)
+			aic_quiet_stop(s);
 		mutex_lock(&s->mutex);
 		aic_slave_stop();
 		hrtimer_cancel(&aic_dev.playback.timer);
@@ -1289,6 +1418,10 @@ static int aic_remove(struct platform_device *pdev)
 	snd_soc_unregister_platform(&pdev->dev);
 	snd_soc_unregister_component(&pdev->dev);
 	destroy_workqueue(aic_dev.wq);
+	if (quiet_silence) {
+		m_dma_free_coherent(quiet_silence, QUIET_SILENCE);
+		quiet_silence = NULL;
+	}
 	m_gpio_free(PIN_RX_DATA);
 	m_gpio_free(PIN_RX_LRCLK);
 	m_gpio_free(PIN_RX_BCLK);

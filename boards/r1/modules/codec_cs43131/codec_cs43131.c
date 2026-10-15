@@ -16,6 +16,13 @@
 // last value written to each of its registers. Registers are written only
 // while a stream is open.
 //
+// The I2S clocks come from the AIC and stop at every pause, every track
+// change and every stop; a DAC whose output is live when they stop or start
+// pops in the headphones. So the paths are muted and the headphone amplifier
+// is off from the prepare until the clocks run (the wake callback of
+// soc_aic.ko), and muted and powered down again before the clocks stop (its
+// quiet callback).
+//
 // Mixer controls (reading any of them returns 0):
 //   Left/Right Playback Volume   0..255, the attenuation register value
 //   DOP_EN           1: the next stream is DSD over PCM
@@ -31,7 +38,7 @@
 //   write_lr_flag    "right" or anything else; not read
 //
 // Loaded after utils.ko, which provides i2c_register_device() and the pin
-// parameters.
+// parameters, and after soc_aic.ko, which calls the quiet and wake callbacks.
 
 #include <linux/delay.h>
 #include <linux/device.h>
@@ -44,12 +51,16 @@
 #include <linux/of_gpio.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/workqueue.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
 
 // Exported by utils.ko.
 extern const struct kernel_param_ops param_gpio_ops;
 extern struct i2c_client *i2c_register_device(struct i2c_board_info *info, int busnum);
+
+// Exported by soc_aic.ko.
+extern void aic_playback_hooks(void (*quiet)(void), void (*wake)(void));
 
 // Registers, 24-bit addresses.
 #define CS43131_SP_SRATE	0x01000b
@@ -60,6 +71,14 @@ extern struct i2c_client *i2c_register_device(struct i2c_board_info *info, int b
 #define CS43131_PCM_FILTER	0x090000
 #define CS43131_PCM_VOL_B	0x090001
 #define CS43131_PCM_VOL_A	0x090002
+#define CS43131_DXD1		0x010010
+#define CS43131_PWDN_CTL	0x020000
+#define CS43131_DSD_PATH_CTL_1	0x070002
+#define CS43131_DXD13		0x080032
+#define CS43131_PCM_PATH_CTL_1	0x090003
+
+#define CS43131_PDN_HP		0x10	// PWDN_CTL: the headphone amplifier
+#define CS43131_MUTE		0x03	// PCM and DSD path control 1: both channels
 
 #define CS43131_REG_END		0xffffff
 
@@ -189,6 +208,90 @@ static int cs43131_write_reg_save(unsigned int reg, u8 val)
 	ret = cs43131_i2c_write_reg(reg, val);
 	mutex_unlock(&g_cs43131->reg_mutex);
 	return ret;
+}
+
+// The value the register set holds for reg, or -1.
+static int cs43131_saved_reg(unsigned int reg)
+{
+	struct cs43131_reg *r;
+
+	for (r = cs43131_reg; r->reg != CS43131_REG_END; r++)
+		if (r->reg == reg)
+			return r->val;
+	return -1;
+}
+
+// Both paths muted, or back to the register set. Called with reg_mutex held.
+static void cs43131_mute_paths(bool mute)
+{
+	int pcm = cs43131_saved_reg(CS43131_PCM_PATH_CTL_1);
+	int dsd = cs43131_saved_reg(CS43131_DSD_PATH_CTL_1);
+
+	if (pcm >= 0)
+		cs43131_i2c_write_reg(CS43131_PCM_PATH_CTL_1, mute ? pcm | CS43131_MUTE : pcm);
+	if (dsd >= 0)
+		cs43131_i2c_write_reg(CS43131_DSD_PATH_CTL_1, mute ? dsd | CS43131_MUTE : dsd);
+}
+
+static struct work_struct cs43131_wake_work;
+
+// The quiet callback, from soc_aic.ko's workqueue: playback is about to stop,
+// silence is going out and the clocks still run. A wake still to come is
+// dropped; the paths are muted, then the amplifier powers down while the DAC
+// is still clocked.
+static void cs43131_quiet(void)
+{
+	int pwdn;
+
+	if (!g_cs43131)
+		return;
+	cancel_work_sync(&cs43131_wake_work);
+	mutex_lock(&g_cs43131->reg_mutex);
+	if (g_cs43131->powered) {
+		cs43131_mute_paths(true);
+		msleep(10);
+		pwdn = cs43131_saved_reg(CS43131_PWDN_CTL);
+		if (pwdn >= 0) {
+			cs43131_i2c_write_reg(CS43131_PWDN_CTL, pwdn | CS43131_PDN_HP);
+			msleep(50);
+		}
+	}
+	mutex_unlock(&g_cs43131->reg_mutex);
+}
+
+// Playback has started and the clocks run. The amplifier comes up as the
+// mainline cs43130 driver brings up the CS43131's, with the pop-free setting
+// held around it, then the paths are let go.
+static void cs43131_wake_fn(struct work_struct *work)
+{
+	int pwdn;
+
+	if (!g_cs43131)
+		return;
+	mutex_lock(&g_cs43131->reg_mutex);
+	if (g_cs43131->powered) {
+		pwdn = cs43131_saved_reg(CS43131_PWDN_CTL);
+		if (pwdn >= 0) {
+			cs43131_i2c_write_reg(CS43131_DXD1, 0x99);
+			cs43131_i2c_write_reg(CS43131_DXD13, 0x20);
+			cs43131_i2c_write_reg(CS43131_DXD1, 0);
+			cs43131_i2c_write_reg(CS43131_PWDN_CTL, pwdn & ~CS43131_PDN_HP);
+			usleep_range(10000, 10050);
+			cs43131_i2c_write_reg(CS43131_DXD1, 0x99);
+			usleep_range(12000, 12010);
+			cs43131_i2c_write_reg(CS43131_DXD13, 0);
+			cs43131_i2c_write_reg(CS43131_DXD1, 0);
+		}
+		cs43131_mute_paths(false);
+	}
+	mutex_unlock(&g_cs43131->reg_mutex);
+}
+
+// The wake callback, from soc_aic.ko's start work, which must not wait: the
+// amplifier comes up from a work of its own.
+static void cs43131_wake(void)
+{
+	schedule_work(&cs43131_wake_work);
 }
 
 // Drives the power pin: called by x1600_hiby_r1_sound_card.ko on output
@@ -362,9 +465,16 @@ static int cs43131_dai_prepare(struct snd_pcm_substream *substream, struct snd_s
 	if (!cs43131->dsd_en)
 		cs43131_write_reg_save(CS43131_SP_BITSIZE, 0);
 
+	// Muted, with the amplifier off, until the wake callback.
 	for (r = cs43131_reg; r->reg != CS43131_REG_END; r++) {
+		u8 val = r->val;
+
+		if (r->reg == CS43131_PCM_PATH_CTL_1 || r->reg == CS43131_DSD_PATH_CTL_1)
+			val |= CS43131_MUTE;
+		else if (r->reg == CS43131_PWDN_CTL)
+			val |= CS43131_PDN_HP;
 		mutex_lock(&cs43131->reg_mutex);
-		cs43131_i2c_write_reg(r->reg, r->val);
+		cs43131_i2c_write_reg(r->reg, val);
 		mutex_unlock(&cs43131->reg_mutex);
 	}
 
@@ -741,12 +851,16 @@ static int __init cs43131_init(void)
 		i2c_del_driver(&cs43131_i2c_driver);
 		return -EINVAL;
 	}
+	INIT_WORK(&cs43131_wake_work, cs43131_wake_fn);
+	aic_playback_hooks(cs43131_quiet, cs43131_wake);
 	return 0;
 }
 module_init(cs43131_init);
 
 static void __exit cs43131_exit(void)
 {
+	aic_playback_hooks(NULL, NULL);
+	cancel_work_sync(&cs43131_wake_work);
 	i2c_unregister_device(cs43131_i2c_dev);
 	i2c_del_driver(&cs43131_i2c_driver);
 }
